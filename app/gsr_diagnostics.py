@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
 import sys
 import time
 from pathlib import Path
@@ -79,21 +78,25 @@ def capture_serial(port: str, seconds: float) -> dict:
     """Read GSR lines ('t_us,adc') for N seconds; ignore 'B,' and '#' lines."""
     import serial
 
-    pattern = re.compile(rb"^(\d+),(\d+)$")
+    from arduino import BAUD_RATE, parse_line
+
     t_us, adc, arrival = [], [], []
-    with serial.Serial(port, 115200, timeout=0.25) as ser:
+    with serial.Serial(port, BAUD_RATE, timeout=0.25) as ser:
         time.sleep(2.0)
         ser.reset_input_buffer()
         start = time.monotonic()
         while time.monotonic() - start < seconds:
-            line = ser.readline().strip()
-            if not line or line.startswith(b"B,") or line.startswith(b"#"):
+            line = ser.readline()
+            if not line:
                 continue
-            m = pattern.match(line)
-            if not m or int(m.group(2)) > ADC_MAX:
+            try:
+                parsed = parse_line(line.decode("ascii", errors="strict"))
+            except (UnicodeDecodeError, ValueError):
                 continue
-            t_us.append(int(m.group(1)))
-            adc.append(int(m.group(2)))
+            if parsed[0] != "gsr":
+                continue
+            t_us.append(parsed[1])
+            adc.append(parsed[2])
             arrival.append(time.monotonic() - start)
     adc = np.asarray(adc, dtype=float)
     return {"raw_adc": adc, "voltage": adc * LSB_V,

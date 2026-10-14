@@ -18,6 +18,8 @@ from scipy import signal
 
 MAINS_HZ = 50.0
 _MIN_LEN = 30  # below this many samples we do not filter at all
+FS_TOLERANCE = 0.01  # Use the measured sample rate only if within 1% of the nominal rate.
+GAP_FACTOR = 1.5  # A sample interval above 1.5 periods means dropped samples.
 
 
 def _as_float(values) -> np.ndarray:
@@ -160,6 +162,33 @@ def clean_gsr(values, fs: float) -> np.ndarray:
     if x.size < _MIN_LEN or fs <= 0:
         return x
     return lowpass(moving_average_mains(x, fs), fs, cutoff_hz=5.0, order=2)
+
+
+def clean_recording(voltage_values, nominal_fs: float, arduino_time_us=None) -> np.ndarray:
+    """Clean a recorded GSR series with clean_gsr; always returns one value per input.
+
+    fs is measured from the Arduino timestamps when they are available and within 1% of
+    nominal_fs, otherwise nominal_fs is used. If samples were dropped (an interval
+    longer than 1.5 periods), the filters would see a distorted time axis, so the series is
+    resampled onto a uniform grid (resample_uniform), cleaned, and interpolated
+    back onto the original sample times, which keeps the output aligned row for row.
+    """
+    values = np.asarray(voltage_values, dtype=float)
+    fs = nominal_fs
+    times_s = None
+    if arduino_time_us is not None and len(arduino_time_us) == len(values) and len(values) >= 2:
+        measured = estimate_fs(arduino_time_us)
+        if np.isfinite(measured) and abs(measured - nominal_fs) <= FS_TOLERANCE * nominal_fs:
+            fs = measured
+        times_s = unwrap_micros(arduino_time_us) / 1e6
+
+    if times_s is not None:
+        steps = np.diff(times_s)
+        if np.all(steps > 0) and steps.max() > GAP_FACTOR / fs:
+            grid, uniform = resample_uniform(times_s, values, fs)
+            cleaned = clean_gsr(uniform, fs)
+            return np.interp(times_s, grid, cleaned)
+    return clean_gsr(values, fs)
 
 
 # Registry used by the diagnostics tool: name -> callable(values, fs)

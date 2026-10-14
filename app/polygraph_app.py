@@ -1,48 +1,40 @@
 """Polygraph examination app: GSR + heart-rate acquisition GUI for an Arduino (Uno/Nano).
 
-Expected Arduino serial format (ASCII, 115200 baud, one record per line):
-    <t_us>,<raw_adc>             GSR sample, 500 Hz (t_us = raw 32-bit micros())
-    B,<t_us>,<bpm>,<state>       heart rate, 1 Hz (bpm 0 = not locked; state is one of
-                                 NO_FINGER, SETTLING, ACQUIRING, LOCKED, NO_SENSOR)
-    # <text>                     info/comment, ignored
-
-t_us wraps every ~71.6 minutes, so it is unwrapped on the PC. GSR samples, heart-rate
-readings and question marks all share one Arduino-based clock (see PolygraphApp).
+The serial protocol is described in arduino.py. GSR samples, heart-rate readings
+and question marks all share one Arduino-based clock (see PolygraphApp).
 """
 
 from __future__ import annotations
 
-import csv
 import queue
-import re
 import sys
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-import numpy as np
 import serial
 from serial import SerialException
-from serial.tools import list_ports
 
-# gsr_filters.py sits next to this script; make it importable from any cwd.
+# The sibling modules sit next to this script; make them importable from any cwd.
 _APP_DIR = str(Path(__file__).resolve().parent)
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
-import gsr_filters  # noqa: E402
+from arduino import ADC_MAX, MicrosUnwrapper, detect_arduino, parse_line  # noqa: E402
+from records import (  # noqa: E402
+    BpmReading,
+    Question,
+    Sample,
+    safe_filename,
+    save_examination,
+)
+from plotting import plot_examination  # noqa: E402
 
 
 # ---------------------------- User settings ----------------------------
-BAUD_RATE = 115200
 ADC_REFERENCE_VOLTS = 5.0  # Classic Nano default ADC reference is AVcc (~5 V).
-ADC_MAX = 1023
-SAMPLE_RATE_HZ = 500.0
-FS_TOLERANCE = 0.01  # Use the measured sample rate only if within 1% of SAMPLE_RATE_HZ.
-GAP_FACTOR = 1.5  # A sample interval above 1.5 periods means dropped samples.
 ANSWER_CHOICES = ("Yes", "No", "Undefined")  # Keys 1, 2, 3.
 MARK_DEBOUNCE_SECONDS = 0.25  # Ignore a key-repeat Enter right after an answer is saved.
 MIN_QUESTION_GAP_SECONDS = 12  # GSR recovery time before the next question.
@@ -51,345 +43,10 @@ DEFAULT_TEST_SECONDS = 300
 SERIAL_TIMEOUT_SECONDS = 2.0
 ZERO_WARNING_AFTER_SECONDS = 0.10
 BPM_STALE_SECONDS = 3.0  # Show "no data" if no B line arrived for this long.
-BPM_STATES = ("NO_FINGER", "SETTLING", "ACQUIRING", "LOCKED", "NO_SENSOR")
-BPM_MAX = 300
 GSR_SHORT_MIN = 1020  # ADC at/above this means maxed at 5 V (short/wiring fault), as in the sketch.
 GSR_READING_STALE_SECONDS = 0.5  # GSR "readings: no" if no in-range sample for this long.
-MICROS_WRAP = 1 << 32
 OUTPUT_FOLDER = Path(__file__).resolve().parent / "measurements"
 # -----------------------------------------------------------------------
-
-
-@dataclass
-class Sample:
-    elapsed_s: float  # Arduino-based time since recording start.
-    pc_time_s: float  # PC receive time since recording start (reference only).
-    arduino_time_us: int  # Raw 32-bit micros() value as sent by the Arduino.
-    raw_adc: int
-    voltage_v: float
-
-
-@dataclass
-class BpmReading:
-    time_s: float  # Arduino-based time since recording start.
-    pc_time_s: float  # PC receive time since recording start.
-    arduino_time_us: int  # Raw 32-bit micros() value as sent by the Arduino.
-    bpm: int  # 0 when not locked.
-    state: str
-
-
-@dataclass
-class Question:
-    number: int
-    time_s: float  # Arduino-based time since recording start.
-    pc_time_s: float = 0.0  # PC clock time since recording start (reference only).
-    answer: str = ""
-    truth: str = ""
-    answer_time_s: float | None = None  # Arduino-based time the answer was saved.
-    answer_pc_time_s: float | None = None  # PC clock time the answer was saved.
-
-
-class MicrosUnwrapper:
-    """Turn wrapping 32-bit micros() values into a monotonic 64-bit count.
-
-    One instance must be shared by GSR and B lines, because both come from the same
-    Arduino clock. Small backwards steps (reordering) are tolerated, not treated as a wrap.
-    """
-
-    def __init__(self) -> None:
-        self.last_raw: int | None = None
-        self.unwrapped = 0
-
-    def unwrap(self, raw_us: int) -> int:
-        if self.last_raw is None:
-            self.unwrapped = raw_us
-        else:
-            delta = (raw_us - self.last_raw) % MICROS_WRAP
-            if delta >= MICROS_WRAP // 2:
-                delta -= MICROS_WRAP  # Slightly older than the previous value.
-            self.unwrapped += delta
-        self.last_raw = raw_us
-        return self.unwrapped
-
-
-def safe_filename(name: str) -> str:
-    """Keep Hebrew/Unicode letters while removing invalid Windows filename chars."""
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name.strip())
-    cleaned = cleaned.rstrip(". ")
-    return cleaned or "subject"
-
-
-def parse_line(line: str) -> tuple:
-    """Parse one serial line.
-
-    Returns ("gsr", t_us, raw_adc), ("bpm", t_us, bpm, state) or ("comment", text).
-    Raises ValueError for anything else.
-    """
-    text = line.strip()
-    if text.startswith("#"):
-        return ("comment", text[1:].strip())
-
-    fields = text.split(",")
-    if fields[0] == "B":
-        if len(fields) != 4:
-            raise ValueError("Expected B,t_us,bpm,state")
-        t_us = int(fields[1])
-        bpm = int(fields[2])
-        state = fields[3].strip()
-        if not 0 <= t_us < MICROS_WRAP or not 0 <= bpm <= BPM_MAX or state not in BPM_STATES:
-            raise ValueError("Heart-rate values are outside the expected range")
-        return ("bpm", t_us, bpm, state)
-
-    if len(fields) != 2:
-        raise ValueError("Expected two comma-separated values")
-    t_us = int(fields[0])
-    raw_adc = int(fields[1])
-    if not 0 <= t_us < MICROS_WRAP or not 0 <= raw_adc <= ADC_MAX:
-        raise ValueError("Serial values are outside the expected range")
-    return ("gsr", t_us, raw_adc)
-
-
-def candidate_ports() -> list[str]:
-    ports = list(list_ports.comports())
-    preferred_words = ("arduino", "ch340", "usb serial", "nano")
-    ports.sort(
-        key=lambda p: not any(
-            word in f"{p.description} {p.manufacturer or ''}".lower()
-            for word in preferred_words
-        )
-    )
-    return [p.device for p in ports]
-
-
-def detect_arduino() -> tuple[serial.Serial, str]:
-    """Open ports one by one and accept the first with valid GSR sample lines."""
-    ports = candidate_ports()
-    if not ports:
-        raise RuntimeError("No serial ports were found. Connect the Arduino and try again.")
-
-    errors: list[str] = []
-    for port in ports:
-        connection: serial.Serial | None = None
-        try:
-            connection = serial.Serial(port, BAUD_RATE, timeout=0.25)
-            # Opening a Nano can reset it. Allow time for the bootloader/sketch.
-            time.sleep(2.0)
-            connection.reset_input_buffer()
-            deadline = time.monotonic() + 2.5
-            valid_lines = 0
-            while time.monotonic() < deadline:
-                data = connection.readline()
-                if not data:
-                    continue
-                try:
-                    parsed = parse_line(data.decode("ascii", errors="strict"))
-                    # B and # lines are valid but must not count or reset the counter.
-                    if parsed[0] == "gsr":
-                        valid_lines += 1
-                    if valid_lines >= 3:
-                        connection.reset_input_buffer()
-                        return connection, port
-                except (UnicodeDecodeError, ValueError):
-                    valid_lines = 0
-            errors.append(f"{port}: no valid GSR data")
-        except (OSError, SerialException) as exc:
-            errors.append(f"{port}: {exc}")
-        if connection is not None and connection.is_open:
-            connection.close()
-
-    details = "\n".join(errors)
-    raise RuntimeError(
-        "Could not find an Arduino sending 'time_us,raw_adc' GSR lines "
-        "(plus optional 'B,time_us,bpm,state' heart-rate lines) at 115200 baud.\n\n"
-        + details
-    )
-
-
-def filter_gsr(voltage_values, arduino_time_us=None) -> np.ndarray:
-    """Clean the GSR voltage with gsr_filters.clean_gsr; always returns one value per input.
-
-    fs is measured from the Arduino timestamps when they are available and within 1% of
-    SAMPLE_RATE_HZ, otherwise SAMPLE_RATE_HZ is used. If samples were dropped (an interval
-    longer than 1.5 periods), the filters would see a distorted time axis, so the series is
-    resampled onto a uniform grid (gsr_filters.resample_uniform), cleaned, and interpolated
-    back onto the original sample times, which keeps the output aligned row for row.
-    """
-    values = np.asarray(voltage_values, dtype=float)
-    fs = SAMPLE_RATE_HZ
-    times_s = None
-    if arduino_time_us is not None and len(arduino_time_us) == len(values) and len(values) >= 2:
-        measured = gsr_filters.estimate_fs(arduino_time_us)
-        if np.isfinite(measured) and abs(measured - SAMPLE_RATE_HZ) <= FS_TOLERANCE * SAMPLE_RATE_HZ:
-            fs = measured
-        times_s = gsr_filters.unwrap_micros(arduino_time_us) / 1e6
-
-    if times_s is not None:
-        steps = np.diff(times_s)
-        if np.all(steps > 0) and steps.max() > GAP_FACTOR / fs:
-            grid, uniform = gsr_filters.resample_uniform(times_s, values, fs)
-            cleaned = gsr_filters.clean_gsr(uniform, fs)
-            return np.interp(times_s, grid, cleaned)
-    return gsr_filters.clean_gsr(values, fs)
-
-
-def plot_examination(
-    voltage_csv: str | Path,
-    questions_csv: str | Path,
-    bpm_csv: str | Path | None = None,
-    subject_name: str = "",
-) -> None:
-    """Plot GSR voltage and heart rate over time and mark every question."""
-    import matplotlib.pyplot as plt
-
-    voltage_csv = Path(voltage_csv)
-    questions_csv = Path(questions_csv)
-
-    times: list[float] = []
-    raw_voltages: list[float] = []
-    filtered_voltages: list[float] = []
-    arduino_us: list[int] = []
-    with voltage_csv.open("r", newline="", encoding="utf-8-sig") as file:
-        reader = csv.DictReader(file)
-        required = {"time_s", "voltage_v"}
-        if not required.issubset(reader.fieldnames or []):
-            raise ValueError(f"{voltage_csv.name} is missing required columns: {required}")
-        for row in reader:
-            times.append(float(row["time_s"]))
-            raw_voltages.append(float(row["voltage_v"]))
-            if row.get("arduino_time_us", "").strip():
-                arduino_us.append(int(row["arduino_time_us"]))
-            if "filtered_voltage_v" in row and row["filtered_voltage_v"].strip():
-                filtered_voltages.append(float(row["filtered_voltage_v"]))
-
-    if not times:
-        raise ValueError(f"{voltage_csv.name} contains no voltage samples")
-
-    # Older voltage files may not yet contain the filtered column. Filter them
-    # here so the graph always displays the cleaned signal.
-    if len(filtered_voltages) != len(raw_voltages):
-        filtered_voltages = filter_gsr(raw_voltages, arduino_us or None).tolist()
-
-    questions: list[tuple[float, int, str]] = []
-    with questions_csv.open("r", newline="", encoding="utf-8-sig") as file:
-        reader = csv.DictReader(file)
-        required = {"question_time_s", "question_number", "answer_type"}
-        if not required.issubset(reader.fieldnames or []):
-            raise ValueError(f"{questions_csv.name} is missing required columns: {required}")
-        for row in reader:
-            questions.append(
-                (
-                    float(row["question_time_s"]),
-                    int(row["question_number"]),
-                    row["answer_type"].strip() or "Unclassified",
-                )
-            )
-
-    # Heart-rate readings are optional; bpm == 0 (not locked) becomes a gap.
-    bpm_times: list[float] = []
-    bpm_values: list[float] = []
-    if bpm_csv is not None and Path(bpm_csv).exists():
-        with Path(bpm_csv).open("r", newline="", encoding="utf-8-sig") as file:
-            reader = csv.DictReader(file)
-            if {"time_s", "bpm"}.issubset(reader.fieldnames or []):
-                for row in reader:
-                    bpm_times.append(float(row["time_s"]))
-                    bpm = float(row["bpm"])
-                    bpm_values.append(bpm if bpm > 0 else float("nan"))
-    has_bpm = any(value == value for value in bpm_values)  # any non-NaN value
-
-    figure, (axis, bpm_axis) = plt.subplots(
-        2,
-        1,
-        sharex=True,
-        figsize=(13, 8),
-        gridspec_kw={"height_ratios": [3, 2]},
-    )
-    axis.plot(
-        times,
-        filtered_voltages,
-        color="#195a8a",
-        linewidth=1.0,
-        label="GSR voltage (20 ms mains-cancelling average + 5 Hz low-pass)",
-    )
-
-    voltage_min = min(filtered_voltages)
-    voltage_max = max(filtered_voltages)
-    voltage_range = voltage_max - voltage_min
-    if voltage_range == 0:
-        voltage_range = max(abs(voltage_max), 1.0)
-    label_y = voltage_max + 0.03 * voltage_range
-
-    for question_time, question_number, answer_type in questions:
-        normalized_type = answer_type.casefold()
-        if normalized_type == "truth":
-            color = "#218739"
-        elif normalized_type == "lie":
-            color = "#c62828"
-        else:
-            color = "#6a6a6a"
-
-        axis.axvline(
-            x=question_time,
-            color=color,
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.9,
-        )
-        axis.text(
-            question_time,
-            label_y,
-            f"Question {question_number} — {answer_type}",
-            color=color,
-            rotation=90,
-            ha="right",
-            va="top",
-            fontsize=9,
-            backgroundcolor="white",
-        )
-        bpm_axis.axvline(
-            x=question_time,
-            color=color,
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.9,
-        )
-
-    if has_bpm:
-        bpm_axis.plot(
-            bpm_times,
-            bpm_values,
-            color="#b3261e",
-            linewidth=1.2,
-            drawstyle="steps-post",
-            marker="o",
-            markersize=3,
-        )
-    else:
-        bpm_axis.text(
-            0.5,
-            0.5,
-            "No heart-rate data",
-            transform=bpm_axis.transAxes,
-            ha="center",
-            va="center",
-            color="#6a6a6a",
-            fontsize=12,
-        )
-
-    title = "GSR Voltage vs. Time — mains-cancelling 20 ms average + 5 Hz low-pass"
-    if subject_name:
-        title += f" — {subject_name}"
-    axis.set_title(title)
-    axis.set_ylabel("Voltage (V)")
-    axis.grid(True, alpha=0.25)
-    axis.legend(loc="upper right", fontsize=8)
-    axis.margins(x=0.01, y=0.12)
-    bpm_axis.set_xlabel("Time (s)")
-    bpm_axis.set_ylabel("Heart rate (BPM)")
-    bpm_axis.grid(True, alpha=0.25)
-    bpm_axis.margins(y=0.15)
-    figure.tight_layout()
-    plt.show()
 
 
 class PolygraphApp(tk.Tk):
@@ -1237,74 +894,9 @@ class PolygraphApp(tk.Tk):
             plot_examination(*saved_paths, subject_name=self.subject_name)
 
     def save_files(self, partial: bool) -> str:
-        OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
-        suffix = "_PARTIAL" if partial else ""
-        voltage_path = OUTPUT_FOLDER / f"{self.file_stem}_voltage{suffix}.csv"
-        questions_path = OUTPUT_FOLDER / f"{self.file_stem}_questions{suffix}.csv"
-        bpm_path = OUTPUT_FOLDER / f"{self.file_stem}_bpm{suffix}.csv"
-        self.last_saved_paths = (voltage_path, questions_path, bpm_path)
-
-        filtered_voltages = filter_gsr(
-            [sample.voltage_v for sample in self.samples],
-            [sample.arduino_time_us for sample in self.samples],
+        voltage_path, questions_path, bpm_path = self.last_saved_paths = save_examination(
+            OUTPUT_FOLDER, self.file_stem, self.samples, self.questions, self.bpm_readings, partial
         )
-
-        with voltage_path.open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.writer(file)
-            writer.writerow(
-                [
-                    "time_s",
-                    "pc_time_s",
-                    "arduino_time_us",
-                    "raw_adc",
-                    "voltage_v",
-                    "filtered_voltage_v",
-                ]
-            )
-            for sample, filtered_voltage in zip(self.samples, filtered_voltages):
-                writer.writerow(
-                    [
-                        f"{sample.elapsed_s:.6f}",
-                        f"{sample.pc_time_s:.6f}",
-                        sample.arduino_time_us,
-                        sample.raw_adc,
-                        f"{sample.voltage_v:.6f}",
-                        f"{filtered_voltage:.6f}",
-                    ]
-                )
-
-        with questions_path.open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.writer(file)
-            writer.writerow(
-                ["question_time_s", "pc_time_s", "question_number", "subject_answer", "answer_type",
-                 "answer_time_s", "answer_pc_time_s"]
-            )
-            for question in self.questions:
-                writer.writerow(
-                    [
-                        f"{question.time_s:.6f}",
-                        f"{question.pc_time_s:.6f}",
-                        question.number,
-                        question.answer,
-                        question.truth,
-                        "" if question.answer_time_s is None else f"{question.answer_time_s:.6f}",
-                        "" if question.answer_pc_time_s is None else f"{question.answer_pc_time_s:.6f}",
-                    ]
-                )
-
-        with bpm_path.open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.writer(file)
-            writer.writerow(["time_s", "pc_time_s", "arduino_time_us", "bpm", "state"])
-            for reading in self.bpm_readings:
-                writer.writerow(
-                    [
-                        f"{reading.time_s:.6f}",
-                        f"{reading.pc_time_s:.6f}",
-                        reading.arduino_time_us,
-                        reading.bpm,
-                        reading.state,
-                    ]
-                )
 
         kind = "Partial files were saved" if partial else "Files saved"
         return (
