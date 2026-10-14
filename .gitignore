@@ -1,0 +1,5 @@
+__pycache__/
+
+# Recorded examinations; .gitkeep keeps the folder in the repo.
+app/measurements/*
+!app/measurements/.gitkeep
