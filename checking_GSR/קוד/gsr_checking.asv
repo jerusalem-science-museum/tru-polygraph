@@ -1,0 +1,310 @@
+port = "COM5";          % Arduino port
+baudRate = 115200;      % Must match Serial.begin()
+duration = 30;          % Recording duration in seconds
+
+arduinoSerial = serialport(port, baudRate);
+configureTerminator(arduinoSerial, "LF");
+pause(2);
+flush(arduinoSerial);
+
+startTime = tic;
+
+timeMicros = [];
+rawValues = [];
+
+while toc(startTime) < duration
+    textLine = readline(arduinoSerial);
+    values = sscanf(textLine, '%f,%f');
+
+    if numel(values) == 2
+        timeMicros(end+1,1) = values(1);
+        rawValues(end+1,1) = values(2);
+    end
+end
+
+clear arduinoSerial
+
+timeSeconds = (timeMicros - timeMicros(1)) / 1e6;
+voltage = rawValues * 5.0 / 1023;
+
+data = table(timeSeconds, voltage, rawValues);
+writetable(data, "gsr_measurement_different_hands.csv");
+
+%% plotting the different messurements
+files = {
+    "gsr_results.csv"
+};
+
+figure;
+layout = tiledlayout(2, 2);
+title(layout, "GSR Measurements");
+
+for i = 1:4
+    data = readtable(files{i});
+
+    nexttile;
+
+    plot(data.timeSeconds, data.voltage, ...
+        "LineWidth", 1);
+
+    xlabel("Time [s]");
+    ylabel("Voltage [V]");
+
+    % Display the filename as the title
+    [~, fileName, ~] = fileparts(files{i});
+    fileName = erase(fileName, "gsr_measurement_");
+    title(strrep(fileName, "_", "\_"));
+
+    % Same scale for all graphs
+    xlim([0 30]);
+    ylim([0 2]);
+
+    grid on;
+end
+%% table with frequancy and amplitude
+files = {
+    "gsr_measurement_no_hand.csv"
+    "gsr_measurement_hand.csv"
+    "gsr_measurement_little_pressure.csv"
+    "gsr_measurement_no_sleeve.csv"
+};
+
+results = table();
+
+for i = 1:length(files)
+
+    % Read file
+    data = readtable(files{i});
+
+    time = data.timeSeconds;
+    voltage = data.voltage;
+
+    % Clean filename
+    [~, fileName, ~] = fileparts(files{i});
+    fileName = regexprep(fileName, "^gsr_measurement\d*_*", "");
+    fileName = strrep(fileName, "_", " ");
+
+    % Mean voltage
+    averageVoltage = mean(voltage);
+
+    % Sampling frequency
+    Fs = 1 / mean(diff(time));
+
+    % Remove DC component
+    signal = voltage - mean(voltage);
+
+    % FFT
+    N = length(signal);
+    Y = fft(signal);
+
+    frequency = (0:floor(N/2))' * Fs / N;
+
+    amplitude = abs(Y(1:floor(N/2)+1)) / N;
+    amplitude(2:end-1) = 2 * amplitude(2:end-1);
+
+    % Select every frequency between 1 and 100 Hz
+    % whose amplitude exceeds 0.01 V
+    selected = frequency >= 0 & ...
+               frequency <= 100 & ...
+               amplitude > 0.01;
+
+    selectedFrequency = frequency(selected);
+    selectedAmplitude = amplitude(selected);
+
+    % Create rows for this file
+    numberSelected = length(selectedFrequency);
+
+    if numberSelected > 0
+        currentResults = table( ...
+            repmat(string(fileName), numberSelected, 1), ...
+            repmat(averageVoltage, numberSelected, 1), ...
+            selectedFrequency, ...
+            selectedAmplitude, ...
+            'VariableNames', {
+                'Measurement', ...
+                'MeanVoltage_V', ...
+                'Frequency_Hz', ...
+                'Amplitude_V'
+            });
+    else
+        % Preserve the file in the table even if no amplitude exceeds 0.01 V
+        currentResults = table( ...
+            string(fileName), ...
+            averageVoltage, ...
+            NaN, ...
+            NaN, ...
+            'VariableNames', {
+                'Measurement', ...
+                'MeanVoltage_V', ...
+                'Frequency_Hz', ...
+                'Amplitude_V'
+            });
+    end
+
+    results = [results; currentResults];
+end
+
+% Display and save
+disp(results);
+writetable(results, "gsr_results.csv");
+%% FFT for all files 
+files = {
+    "gsr_measurement_no_hand.csv"
+    "gsr_measurement_hand.csv"
+    "gsr_measurement_little_pressure.csv"
+    "gsr_measurement_no_sleeve.csv"
+};
+
+figure;
+layout = tiledlayout(2, 2);
+title(layout, "FFT of GSR Measurements");
+
+for i = 1:4
+
+    % Read the file
+    data = readtable(files{i});
+
+    time = data.timeSeconds;
+    voltage = data.voltage;
+
+    % Calculate sampling frequency
+    Fs = 1 / mean(diff(time));
+
+    % Remove mean voltage
+    signal = voltage - mean(voltage);
+
+    % Calculate FFT
+    N = length(signal);
+    Y = fft(signal);
+
+    % Positive-frequency axis
+    frequency = (0:floor(N/2))' * Fs / N;
+
+    % Normalized one-sided amplitude
+    amplitude = abs(Y(1:floor(N/2)+1)) / N;
+    amplitude(2:end-1) = 2 * amplitude(2:end-1);
+
+    % Create the next graph
+    nexttile;
+
+    plot(frequency, amplitude, ...
+        "LineWidth", 2);
+
+    xlabel("Frequency [Hz]");
+    ylabel("Amplitude [V]");
+
+    % Clean filename for title
+    [~, fileName, ~] = fileparts(files{i});
+    fileName = regexprep(fileName, ...
+        "^gsr_measurement\d*_*", "");
+    fileName = strrep(fileName, "_", " ");
+
+    title(fileName);
+
+    xlim([0 100]);
+    grid on;
+
+    set(gca, "FontSize", 11);
+    
+end
+allAxes = findall(gcf, "Type", "axes");
+linkaxes(allAxes, "y");
+%% std for no sleeve 
+data = readtable("gsr_measurement_no_sleeve.csv");
+time = data.timeSeconds;
+voltage = data.voltage;
+meanVoltage = mean(voltage);
+standardDeviation = std(voltage);
+relativeVariation = standardDeviation / abs(meanVoltage) *100 ;
+disp (standardDeviation)
+%% averaging on specific data set
+% Read a specific file
+data = readtable(files{2});
+
+time = data.timeSeconds;
+voltage = data.voltage;
+
+% Calculate actual sampling frequency
+Fs = 1 / mean(diff(time));
+
+% Averaging-window duration
+windowTime = 2;  % seconds
+
+% Convert window duration to number of samples
+windowSize = round(windowTime * Fs);
+
+% Moving average
+smoothedVoltage = movmean(voltage, windowSize);
+
+% Plot original and averaged signals
+figure;
+
+plot(time, voltage, ...
+    "Color", [0.7 0.7 0.7], ...
+    "LineWidth", 1);
+
+hold on;
+
+plot(time, smoothedVoltage, ...
+    "b", ...
+    "LineWidth", 2);
+
+hold off;
+
+xlabel("Time [s]");
+ylabel("Voltage [V]");
+title("Original and Averaged GSR Signal");
+
+legend("Original signal", "Moving average");
+grid on;
+%% averaging all the files 
+files = {
+    "gsr_measurement_no_hand.csv"
+    "gsr_measurement_hand.csv"
+    "gsr_measurement_little_pressure.csv"
+    "gsr_measurement_no_sleeve.csv"
+};
+
+figure;
+hold on;
+
+names = strings(length(files), 1);
+
+for i = 1:length(files)
+
+    % Read file
+    data = readtable(files{i});
+
+    time = data.timeSeconds;
+    voltage = data.voltage;
+
+    % Calculate actual sampling frequency
+    Fs = 1 / mean(diff(time));
+
+    % Moving-average window of 0.1 seconds
+    windowTime = 1;
+    windowSize = round(windowTime * Fs);
+
+    % Calculate moving average
+    smoothedVoltage = movmean(voltage, windowSize);
+
+    % Plot averaged signal
+    plot(time, smoothedVoltage, "LineWidth", 2);
+
+    % Clean filename for legend
+    [~, fileName, ~] = fileparts(files{i});
+    fileName = regexprep(fileName, ...
+        "^gsr_measurement\d*_*", "");
+    names(i) = strrep(fileName, "_", " ");
+end
+
+hold off;
+
+xlabel("Time [s]");
+ylabel("Averaged voltage [V]");
+title("Averaged GSR Measurements");
+
+legend(names, "Location", "best");
+grid on;
+
+xlim([0 30]);
