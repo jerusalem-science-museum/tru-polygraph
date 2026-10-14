@@ -13,7 +13,7 @@ Each sketch must stay in its own folder, because Arduino merges every `.ino` in 
 
 ## Build / upload
 
-There is no build config, board definition, or test suite in the repo; the target board is not recorded. Arduino requires the sketch folder name to match the `.ino` name, so keep `max30102/max30102.ino` paired.
+There is no build config, board definition, or test suite in the repo. The README wires the sensor to an Arduino Uno (SDA=A4, SCL=A5), but no FQBN is recorded; verify on hardware via the serial output. Arduino requires the sketch folder name to match the `.ino` name, so keep `max30102/max30102.ino` paired.
 
 Dependency: **SparkFun MAX3010x Pulse and Proximity Sensor Library** (provides `MAX30105.h` and `heartRate.h`; the MAX30105 driver also drives the MAX30102).
 
@@ -25,6 +25,18 @@ arduino-cli compile --fqbn <fqbn> max30102
 arduino-cli upload  --fqbn <fqbn> -p <port> max30102
 arduino-cli monitor -p <port> -c baudrate=115200
 ```
+
+## How bpm_detector.ino works
+
+User-facing docs (wiring, serial output fields, tuning table, troubleshooting) live in [README.md](README.md); keep it in sync when changing constants, output formats, or states.
+
+- **Time base is the sample count, not `millis()`**: `t = sampleCount * SAMPLE_MS` (10 ms). `millis()` is only used for the 1 s status print. The sensor is configured for 400 Hz with 4-sample averaging = 100 Hz effective, and `FS` must match or the biquad coefficients are wrong.
+- **`loop()` must keep draining the FIFO** (`sensor.check()` then `while (sensor.available())`); each sample goes through `processSample()`. Don't add `delay()` or slow work (`sps` in the STATUS line should stay ~100). In plot mode a line is printed per sample, so it is much heavier on serial.
+- **Signal chain in `processSample()`**: `-lpf.step(hpf.step(raw))`. The sign is inverted because IR drops on each pulse, so a heartbeat is a positive peak. `sig`, `sig1`, `sig2` are the last three samples; a peak is detected one sample late (at `sig1`), so peak time is `t - SAMPLE_MS`.
+- **State machine**: `NO_FINGER -> SETTLING (SETTLE_SAMPLES) -> ACQUIRING -> LOCKED`. Losing the finger (`raw < FINGER_THRESHOLD`) resets from any state. On finger placement the filters are primed with `reset()` so the DC step doesn't ring.
+- **Beat validation in `handlePeak()`**: reference interval is the median of the last `IBI_HIST` intervals once there are 3, else the previous interval. Interval too short is an extra peak (`lastPeakT` is deliberately *not* advanced); too long is a missed beat (`lastPeakT` is advanced); `MAX_CONSEC_REJECT` rejects or `BEAT_TIMEOUT_MS` without an accepted beat re-acquires. `bpm` is only non-zero once `MIN_BEATS_LOCK` intervals are accepted.
+- **Output contract**: `q` mode prints exactly `BPM=<n>` once a second (0 when not locked) and is meant for another program to parse, so don't change that format. `t` and `p` are for human diagnostics.
+- The code uses `float` math and the Arduino `PI`; all tunables are `const`s at the top of the file.
 
 ## How max30102.ino works
 
