@@ -50,6 +50,9 @@ ZERO_WARNING_AFTER_SECONDS = 0.10
 BPM_STALE_SECONDS = 3.0  # Show "no data" if no B line arrived for this long.
 GSR_SHORT_MIN = 1020  # ADC at/above this means maxed at 5 V (short/wiring fault), as in the sketch.
 GSR_READING_STALE_SECONDS = 0.5  # GSR "readings: no" if no in-range sample for this long.
+TRUTH_FLASH_COLOR = "#2e7d32"  # Banner colour flashed when Truth is registered.
+LIE_FLASH_COLOR = "#c62828"  # Banner colour flashed when Lie is registered.
+FLASH_MS = 400  # How long the Truth/Lie banner stays coloured.
 # Frozen (PyInstaller) builds save next to the exe, not in the temp extraction folder.
 if getattr(sys, "frozen", False):
     OUTPUT_FOLDER = Path(sys.executable).resolve().parent / "measurements"
@@ -128,6 +131,8 @@ class PolygraphApp(tk.Tk):
         self.q_bg = self.q_neutral_bg
         self.q_screen_active = False
         self.q_flash_after: str | None = None
+        self.truth_flash_after: str | None = None
+        self.truth_flash_label: tk.Label | None = None
         self.style.configure("Q.TFrame", background=self.q_neutral_bg)
         self.style.configure("Q.TLabel", background=self.q_neutral_bg, foreground="#202020")
         self.style.configure("Q.TRadiobutton", background=self.q_neutral_bg, foreground="#202020")
@@ -160,6 +165,7 @@ class PolygraphApp(tk.Tk):
         if self.q_flash_after is not None:
             self.after_cancel(self.q_flash_after)
             self.q_flash_after = None
+        self.cancel_truth_flash()
         if self.q_screen_active:  # Undo the question screen's whole-window colouring.
             self.q_screen_active = False
             self.container.configure(style="TFrame")
@@ -794,6 +800,13 @@ class PolygraphApp(tk.Tk):
         self.truth_bottom_frame = ttk.Frame(self.container)
         self.truth_bottom_frame.pack(side="bottom", fill="x")
         ttk.Label(self.container, text="Classify each answer", style="Title.TLabel").pack(pady=(4, 8))
+        # Plain tk.Label (ttk takes no bg); stays on screen across question changes so the
+        # flash remains visible after the screen advances. Fixed height reserves its space.
+        self.truth_flash_label = tk.Label(
+            self.container, text="", font=("Segoe UI", 28, "bold"), fg="white",
+            bg=self.q_neutral_bg, height=1,
+        )
+        self.truth_flash_label.pack(fill="x", padx=40, pady=(0, 6))
         self.truth_progress_label = ttk.Label(self.container, text="")
         self.truth_progress_label.pack()
         self.truth_question_label = ttk.Label(self.container, text="", style="Question.TLabel")
@@ -878,6 +891,37 @@ class PolygraphApp(tk.Tk):
         self.questions[self.truth_index].truth = truth
         self.truth_index += 1
         self.render_truth_question()
+        self.flash_truth(truth)
+
+    def flash_truth(self, truth: str) -> None:
+        """Briefly colour the banner green (Truth) or red (Lie); never blocks."""
+        label = self.truth_flash_label
+        if label is None:
+            return
+        self.cancel_truth_flash()  # Rapid presses: drop the pending revert so colour never sticks.
+        color = TRUTH_FLASH_COLOR if truth == "Truth" else LIE_FLASH_COLOR
+        try:
+            label.config(text=truth.upper(), bg=color)
+        except tk.TclError:
+            return
+        self.truth_flash_after = self.after(FLASH_MS, self.end_truth_flash)
+
+    def end_truth_flash(self) -> None:
+        self.truth_flash_after = None
+        label = self.truth_flash_label
+        if label is not None:
+            try:
+                label.config(text="", bg=self.q_neutral_bg)
+            except tk.TclError:
+                pass  # Screen already left.
+
+    def cancel_truth_flash(self) -> None:
+        if self.truth_flash_after is not None:
+            try:
+                self.after_cancel(self.truth_flash_after)
+            except tk.TclError:
+                pass
+            self.truth_flash_after = None
 
     def truth_back(self, _event: object | None = None) -> None:
         if self.finished or self.truth_index <= 0 or self.truth_debounced():
