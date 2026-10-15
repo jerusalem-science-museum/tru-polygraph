@@ -65,7 +65,7 @@ class PolygraphApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
-        self.title(f"GSR Polygraph {VERSION}")
+        self.title(f"Polygraph {VERSION}")
         self.geometry("800x560")
         self.minsize(700, 480)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -280,7 +280,7 @@ class PolygraphApp(tk.Tk):
             self.container, text="Start examination", command=self.begin_examination
         )
         self.setup_start_button.pack(side="bottom", pady=(6, 4))
-        ttk.Label(self.container, text="New GSR examination", style="Title.TLabel").pack(pady=(2, 6))
+        ttk.Label(self.container, text="New Polygraph examination", style="Title.TLabel").pack(pady=(2, 6))
         ttk.Label(self.container, text=f"Arduino connected on {self.port_name}", foreground="#167a35").pack(pady=(0, 6))
 
         status = ttk.Frame(self.container)
