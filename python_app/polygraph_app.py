@@ -794,11 +794,11 @@ class PolygraphApp(tk.Tk):
         self.truth_choices_frame = ttk.Frame(self.container)
         self.truth_choices_frame.pack(pady=10)
         ttk.Radiobutton(
-            self.truth_choices_frame, text="Truth", variable=self.truth_var, value="Truth",
+            self.truth_choices_frame, text="Truth (1)", variable=self.truth_var, value="Truth",
             command=lambda: self.classify_truth("Truth"),
         ).pack(side="left", padx=24)
         ttk.Radiobutton(
-            self.truth_choices_frame, text="Lie", variable=self.truth_var, value="Lie",
+            self.truth_choices_frame, text="Lie (2)", variable=self.truth_var, value="Lie",
             command=lambda: self.classify_truth("Lie"),
         ).pack(side="left", padx=24)
         self.truth_final_label = ttk.Label(
