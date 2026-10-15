@@ -37,7 +37,7 @@ from plotting import plot_examination  # noqa: E402
 ADC_REFERENCE_VOLTS = 5.0  # Classic Nano default ADC reference is AVcc (~5 V).
 ANSWER_CHOICES = ("Yes", "No", "Undefined")  # Keys 1, 2, 3.
 MARK_DEBOUNCE_SECONDS = 0.25  # Ignore a key-repeat Enter right after an answer is saved.
-MIN_QUESTION_GAP_SECONDS = 12  # GSR recovery time before the next question.
+MIN_QUESTION_GAP_SECONDS = 10  # GSR recovery time before the next question.
 DEFAULT_REST_SECONDS = 30
 DEFAULT_TEST_SECONDS = 300
 SERIAL_TIMEOUT_SECONDS = 2.0
