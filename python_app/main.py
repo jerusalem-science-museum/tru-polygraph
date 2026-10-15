@@ -548,7 +548,6 @@ class PolygraphApp(tk.Tk):
         if answer not in ANSWER_CHOICES:
             return
         question.answer = answer
-        question.answer_time_s, question.answer_pc_time_s = self.current_times()
         self.questions.append(question)
         self.pending_question = None  # Cleared first, so a repeated key cannot save twice.
         self.last_answer_saved_at = time.monotonic()
@@ -556,8 +555,7 @@ class PolygraphApp(tk.Tk):
         self.question_label.config(text=f"Question {next_number}")
         self.status_label.config(
             text=(
-                f"Saved: Question {question.number} = {answer} "
-                f"(answered after {question.answer_time_s - question.time_s:.2f} s). "
+                f"Saved: Question {question.number} = {answer}. "
                 f"Waiting for question {next_number}"
             )
         )
@@ -618,8 +616,6 @@ class PolygraphApp(tk.Tk):
         elif self.questions:
             question = self.questions.pop()
             question.answer = ""
-            question.answer_time_s = None
-            question.answer_pc_time_s = None
             self.pending_question = question  # Keeps its original mark time.
             self.last_undo_at = now
             self.set_answer_mode(True)
@@ -765,10 +761,6 @@ class PolygraphApp(tk.Tk):
             answer = self.answer_var.get()
             if answer in ANSWER_CHOICES:
                 self.pending_question.answer = answer
-                (
-                    self.pending_question.answer_time_s,
-                    self.pending_question.answer_pc_time_s,
-                ) = self.current_times()
                 self.questions.append(self.pending_question)
             elif not messagebox.askyesno(
                 "Unfinished question",

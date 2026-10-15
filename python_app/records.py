@@ -36,8 +36,6 @@ class Question:
     pc_time_s: float = 0.0  # PC clock time since recording start (reference only).
     answer: str = ""
     truth: str = ""
-    answer_time_s: float | None = None  # Arduino-based time the answer was saved.
-    answer_pc_time_s: float | None = None  # PC clock time the answer was saved.
 
 
 def safe_filename(name: str) -> str:
@@ -95,8 +93,7 @@ def save_examination(
     with questions_path.open("w", newline="", encoding="utf-8-sig") as file:
         writer = csv.writer(file)
         writer.writerow(
-            ["question_time_s", "pc_time_s", "question_number", "subject_answer", "answer_type",
-             "answer_time_s", "answer_pc_time_s"]
+            ["question_time_s", "pc_time_s", "question_number", "subject_answer", "answer_type"]
         )
         for question in questions:
             writer.writerow(
@@ -106,8 +103,6 @@ def save_examination(
                     question.number,
                     question.answer,
                     question.truth,
-                    "" if question.answer_time_s is None else f"{question.answer_time_s:.6f}",
-                    "" if question.answer_pc_time_s is None else f"{question.answer_pc_time_s:.6f}",
                 ]
             )
 

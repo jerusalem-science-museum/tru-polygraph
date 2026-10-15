@@ -31,8 +31,8 @@ Every file has an Arduino-based time and a PC time. Both are in seconds since th
 
 | Column | Clock | How it is computed | Use it for |
 |---|---|---|---|
-| `time_s` (`question_time_s`, `answer_time_s` in the questions file) | **Arduino** `micros()`, anchored to the PC at the first sample | `(unwrapped_us − anchor_us) / 1e6 + anchor_offset_s`. `anchor_us` is the unwrapped `micros()` of the first GSR sample processed after Start, and `anchor_offset_s` is that sample's PC arrival time (its `pc_time_s`). | **All analysis and alignment.** Sample spacing is the true 2 ms acquisition spacing, unaffected by USB buffering. |
-| `pc_time_s` (`answer_pc_time_s`) | PC `time.monotonic()` | arrival time of the line (or key-press time for questions) − time Start was pressed | Reference and debugging only |
+| `time_s` (`question_time_s` in the questions file) | **Arduino** `micros()`, anchored to the PC at the first sample | `(unwrapped_us − anchor_us) / 1e6 + anchor_offset_s`. `anchor_us` is the unwrapped `micros()` of the first GSR sample processed after Start, and `anchor_offset_s` is that sample's PC arrival time (its `pc_time_s`). | **All analysis and alignment.** Sample spacing is the true 2 ms acquisition spacing, unaffected by USB buffering. |
+| `pc_time_s` | PC `time.monotonic()` | arrival time of the line (or key-press time for questions) − time Start was pressed | Reference and debugging only |
 | `arduino_time_us` | raw Arduino `micros()` | the 32-bit `t_us` exactly as sent, **not unwrapped** | Re-deriving timing, measuring the real sample rate, checking for gaps |
 
 How they relate:
@@ -70,15 +70,13 @@ One row per saved question (`Question` dataclass), in the order they were saved.
 
 | Column | Meaning | Units / values | How it is computed |
 |---|---|---|---|
-| `question_time_s` | When the operator pressed Space/Enter (or clicked) to mark that the question was asked | s, Arduino-based scale | `current_times()[0]` at the mark |
+| `question_time_s` | When the operator pressed Space/Enter (or clicked) to mark the visitor's answer | s, Arduino-based scale | `current_times()[0]` at the mark |
 | `pc_time_s` | Same moment on the PC clock | s | `current_times()[1]` |
 | `question_number` | Sequential number | 1, 2, 3, … | `len(questions) + 1` at the mark. A question reopened with Backspace keeps its number and its original mark time. |
 | `subject_answer` | What the visitor answered | `Yes`, `No`, `Undefined` (`ANSWER_CHOICES`, keys 1/2/3) | set when the answer key is pressed |
 | `answer_type` | Operator's classification after the examination | `Truth`, `Lie`, or empty | set on the classification screen (keys 1/2). It is empty in `_PARTIAL` files. Despite the name, it is the ground truth (truth or lie), not the kind of answer. |
-| `answer_time_s` | When the answer key was pressed | s, Arduino-based scale; empty if missing | `current_times()[0]` at the answer. If the operator presses Backspace to reopen the question, it is reset and recorded again at the new answer. |
-| `answer_pc_time_s` | Same moment on the PC clock | s; empty if missing | `current_times()[1]` |
 
-`answer_time_s − question_time_s` is how long the operator took to enter the answer, not the visitor's reaction time. Use `question_time_s` as the stimulus time when looking for GSR responses (typically 1–3 s later).
+`question_time_s` (the Space/Enter press) is the moment the visitor answered. Use it as the stimulus time when aligning GSR responses (typically 1–3 s later). The time the operator pressed the answer key is not recorded.
 
 ## `*_bpm.csv` — heart rate
 
