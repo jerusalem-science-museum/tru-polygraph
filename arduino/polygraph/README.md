@@ -4,6 +4,8 @@ One Arduino Uno/Nano sketch (`polygraph.ino`) that streams a GSR sensor at 500 H
 
 Library: **SparkFun MAX3010x Pulse and Proximity Sensor Library**.
 
+Full field-by-field documentation of the serial output, the saved CSVs and both filter chains: [docs/](../../docs/README.md).
+
 ```
 arduino-cli compile --fqbn arduino:avr:uno polygraph
 arduino-cli upload  --fqbn arduino:avr:uno -p <port> polygraph
