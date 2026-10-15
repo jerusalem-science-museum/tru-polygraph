@@ -168,4 +168,15 @@ def plot_examination(
     bpm_axis.grid(True, alpha=0.25)
     bpm_axis.margins(y=0.15)
     figure.tight_layout()
+
+    # Save the graph next to the CSVs: <stem>_voltage.csv -> <stem>_plot.png.
+    stem = voltage_csv.stem
+    if stem.endswith("_voltage"):
+        stem = stem[: -len("_voltage")]
+    png_path = voltage_csv.with_name(f"{stem}_plot.png")
+    try:
+        figure.savefig(png_path, dpi=150, bbox_inches="tight")
+    except Exception as error:  # A failed save must not stop the plot from showing.
+        print(f"Could not save the graph image {png_path}: {error}")
+
     plt.show()
