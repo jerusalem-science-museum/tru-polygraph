@@ -1,7 +1,8 @@
-1. explain different bpm states
-2. merge readme from bpm & gsr
-3. add explanation for all columns in tables.
-4. add 1/2 next to truth lie answers @ the end.
-5. explanation for filters in both sensors
-6. make exe on release.
-7. change names to mark as arduino & python
+- create organized docs explaining about the gsr and hr data and the outputs they create serially, as well as the different filters we used for each to clean the data and why we used them.
+- add explanation for all columns in tables.
+- add 1/2 next to truth/lie answers (respectively) @ the end of the buttons in the polygraph app
+- explanation for filters in both sensors
+- /grill-me i want to make a github action that when we create a release for the program it creates an exe of the python app and saves the data in a measurements folder that should be in the same folder as the exe file (or creates it if it doesn't exist).
+- change folder names to make it more clear that one is arduino and one python.
+- add a flash of color for truth/lie so if we press 1/2 we see visually that we did 1/2 (i.e. truth/lie)
+- rename polygraph_app to main and update relevant files that reference it (namely the release.yml and others if exist)
