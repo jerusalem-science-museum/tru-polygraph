@@ -59,7 +59,7 @@ Related documents elsewhere in the repo:
 |---|---|
 | Firmware (GSR at 500 Hz plus heart-rate detector) | [arduino/polygraph/polygraph.ino](../arduino/polygraph/polygraph.ino) |
 | Serial parsing, `micros()` unwrapping, port detection | [python_app/arduino.py](../python_app/arduino.py) |
-| GUI, time base, question marking | [python_app/polygraph_app.py](../python_app/polygraph_app.py) |
+| GUI, time base, question marking | [python_app/main.py](../python_app/main.py) |
 | CSV writing | [python_app/records.py](../python_app/records.py) |
 | GSR filters | [python_app/gsr_filters.py](../python_app/gsr_filters.py) |
 | End-of-session graph | [python_app/plotting.py](../python_app/plotting.py) |

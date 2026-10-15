@@ -1,6 +1,6 @@
 # Saved CSV files
 
-Source of truth: [python_app/records.py](../python_app/records.py) `save_examination()`, with the time base in [python_app/polygraph_app.py](../python_app/polygraph_app.py) (`handle_sample()`, `handle_bpm()`, `current_times()`).
+Source of truth: [python_app/records.py](../python_app/records.py) `save_examination()`, with the time base in [python_app/main.py](../python_app/main.py) (`handle_sample()`, `handle_bpm()`, `current_times()`).
 
 **In short:** each examination produces three spreadsheet files with the same name prefix. One holds the skin-conductance signal (500 rows per second), one holds the questions and answers, and one holds the heart rate (one row per second). They share a time column, `time_s`, so the files can be lined up.
 

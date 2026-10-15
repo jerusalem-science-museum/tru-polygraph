@@ -9,7 +9,7 @@ A science-museum "polygraph" exhibit. The repo is split by language:
 - `arduino/`: firmware (C++ sketches). Each sketch must stay in its own folder named after its `.ino`, because Arduino merges every `.ino` in a folder into one program.
   - [arduino/polygraph/polygraph.ino](arduino/polygraph/polygraph.ino): the current combined firmware (GSR at 500 Hz on A0 plus the MAX30102 BPM detector over I2C, one 115200-baud serial stream). Protocol and wiring: [arduino/polygraph/README.md](arduino/polygraph/README.md).
   - `arduino/legacy/`: old standalone sketches and MATLAB checks, kept for reference (`bpm_detector/`, `checking_GSR/`, `checking ECG/`).
-- `python_app/`: the Python desktop app that reads the serial stream (`polygraph_app.py`, `arduino.py`, `records.py`, `plotting.py`, `gsr_filters.py`, `gsr_diagnostics.py`; see [python_app/readme.md](python_app/readme.md) and `python_app/NOISE_ANALYSIS.md`). Recordings go to `python_app/measurements/` (gitignored).
+- `python_app/`: the Python desktop app that reads the serial stream (`main.py`, `arduino.py`, `records.py`, `plotting.py`, `gsr_filters.py`, `gsr_diagnostics.py`; see [python_app/readme.md](python_app/readme.md) and `python_app/NOISE_ANALYSIS.md`). Recordings go to `python_app/measurements/` (gitignored).
 - `plan.md`, `todo.md`, `todo_15.10.md`: planning notes.
 
 The BPM detector in `polygraph.ino` is ported from [arduino/legacy/bpm_detector/bpm_detector.ino](arduino/legacy/bpm_detector/bpm_detector.ino), the robust standalone detector: it drains the sensor FIFO at a fixed 100 Hz, timed by sample count rather than `millis()`, then runs a biquad band-pass (0.7–3.5 Hz), an adaptive-threshold peak detector with a refractory period, and validation of each beat interval against the median of recent intervals. The section "How bpm_detector.ino works" below describes that legacy sketch.
@@ -43,4 +43,4 @@ User-facing docs (wiring, serial output fields, tuning table, troubleshooting) l
 
 ## Release build (Python app)
 
-Publishing a GitHub release runs `.github/workflows/release.yml`, which builds a PyInstaller `--onefile` exe (console kept) from `python_app/polygraph_app.py` and attaches it to the release; see [docs/releasing.md](docs/releasing.md). The workflow writes the git-ignored `python_app/_version.py` (shown in the window title). In a frozen build `OUTPUT_FOLDER` is `measurements/` next to the exe (created at startup). `gsr_diagnostics.py` is not packaged.
+Publishing a GitHub release runs `.github/workflows/release.yml`, which builds a PyInstaller `--onefile` exe (console kept) from `python_app/main.py` and attaches it to the release; see [docs/releasing.md](docs/releasing.md). The workflow writes the git-ignored `python_app/_version.py` (shown in the window title). In a frozen build `OUTPUT_FOLDER` is `measurements/` next to the exe (created at startup). `gsr_diagnostics.py` is not packaged.

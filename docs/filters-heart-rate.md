@@ -130,7 +130,7 @@ The `B` line reports `bpm` only when `state == LOCKED`, otherwise 0 (`printBpmLi
 No filtering, smoothing or recalculation. The firmware already reports a median-based value.
 
 - `arduino.py` `parse_line()` checks the range: `0 ≤ bpm ≤ 300` (`BPM_MAX`) and `state` in `BPM_STATES`.
-- `polygraph_app.py` `heart_rate_text()`: shows `Heart rate: <bpm> BPM` only when `state == "LOCKED"` and `bpm > 0`, `Heart rate: -- (<state>)` otherwise, and `Heart rate: no data` if no `B` line arrived for 3 s (`BPM_STALE_SECONDS`). The setup screen shows "check SDA/SCL wiring" for `NO_SENSOR`.
+- `main.py` `heart_rate_text()`: shows `Heart rate: <bpm> BPM` only when `state == "LOCKED"` and `bpm > 0`, `Heart rate: -- (<state>)` otherwise, and `Heart rate: no data` if no `B` line arrived for 3 s (`BPM_STALE_SECONDS`). The setup screen shows "check SDA/SCL wiring" for `NO_SENSOR`.
 - `records.py` saves every `B` line received during the recording unchanged in `*_bpm.csv` (see [csv-files.md](csv-files.md)).
 - `plotting.py` turns `bpm = 0` into gaps (NaN) and draws the rest as a step plot with markers.
 

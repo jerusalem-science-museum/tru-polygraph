@@ -3,7 +3,7 @@
 All filters take a 1-D array of voltages (or ADC codes) and the sample rate
 ``fs`` in Hz and return a new float ndarray of the same length.  Inputs that
 are too short to filter are returned unchanged (as a float array), exactly
-like the old ``apply_50hz_notch_filter`` in polygraph_app.py (formerly gsr_polygraph.py).
+like the old ``apply_50hz_notch_filter`` in main.py (formerly polygraph_app.py / gsr_polygraph.py).
 
 Filters are zero-phase (forward-backward) so they do not shift GSR responses
 in time, which matters because question markers are compared with the signal.

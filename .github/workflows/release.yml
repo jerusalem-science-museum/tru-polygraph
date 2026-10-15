@@ -52,7 +52,7 @@ jobs:
         run: |
           # Console window is kept on purpose (shows errors); do not add --windowed.
           BASE="${ASSET%.exe}"
-          pyinstaller --onefile --name "$BASE" --paths python_app python_app/polygraph_app.py
+          pyinstaller --onefile --name "$BASE" --paths python_app python_app/main.py
           ls -l dist
 
       - name: Upload asset to release

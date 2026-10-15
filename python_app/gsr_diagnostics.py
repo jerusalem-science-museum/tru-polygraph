@@ -4,7 +4,7 @@
     python python_app/gsr_diagnostics.py --selftest [--save out.png]
     python python_app/gsr_diagnostics.py --port COM5 --seconds 30 [--save out.png]
 
-Input CSV (written by polygraph_app.py): columns time_s, arduino_time_us,
+Input CSV (written by main.py): columns time_s, arduino_time_us,
 raw_adc, voltage_v.  Only voltage_v or raw_adc is required; the other columns
 are optional.  Produces a multi-panel figure and a text report (measured fs,
 timing, band RMS, noise RMS before/after each filter, recommendation).
@@ -663,7 +663,7 @@ def selftest(save: str | None, show: bool) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("csv", nargs="?", help="voltage CSV written by polygraph_app.py")
+    ap.add_argument("csv", nargs="?", help="voltage CSV written by main.py")
     ap.add_argument("--save", metavar="PNG", help="save the figure instead of only showing it")
     ap.add_argument("--show", action="store_true", help="open the window even with --save")
     ap.add_argument("--selftest", action="store_true", help="run on synthetic data and assert results")
