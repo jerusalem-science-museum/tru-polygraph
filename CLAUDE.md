@@ -40,3 +40,7 @@ User-facing docs (wiring, serial output fields, tuning table, troubleshooting) l
 - **Beat validation in `handlePeak()`**: reference interval is the median of the last `IBI_HIST` intervals once there are 3, else the previous interval. Interval too short is an extra peak (`lastPeakT` is deliberately *not* advanced); too long is a missed beat (`lastPeakT` is advanced); `MAX_CONSEC_REJECT` rejects or `BEAT_TIMEOUT_MS` without an accepted beat re-acquires. `bpm` is only non-zero once `MIN_BEATS_LOCK` intervals are accepted.
 - **Output contract**: `q` mode prints exactly `BPM=<n>` once a second (0 when not locked) and is meant for another program to parse, so don't change that format. `t` and `p` are for human diagnostics.
 - The code uses `float` math and the Arduino `PI`; all tunables are `const`s at the top of the file.
+
+## Release build (Python app)
+
+Publishing a GitHub release runs `.github/workflows/release.yml`, which builds a PyInstaller `--onefile` exe (console kept) from `python_app/polygraph_app.py` and attaches it to the release; see [docs/releasing.md](docs/releasing.md). The workflow writes the git-ignored `python_app/_version.py` (shown in the window title). In a frozen build `OUTPUT_FOLDER` is `measurements/` next to the exe (created at startup). `gsr_diagnostics.py` is not packaged.

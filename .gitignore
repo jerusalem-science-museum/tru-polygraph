@@ -3,3 +3,9 @@ __pycache__/
 # Recorded examinations; .gitkeep keeps the folder in the repo.
 python_app/measurements/*
 !python_app/measurements/.gitkeep
+
+# Release build artifacts (see docs/releasing.md)
+build/
+dist/
+*.spec
+python_app/_version.py

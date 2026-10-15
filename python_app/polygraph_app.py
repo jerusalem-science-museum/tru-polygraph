@@ -32,6 +32,11 @@ from records import (  # noqa: E402
 )
 from plotting import plot_examination  # noqa: E402
 
+try:  # Written by the release build (.github/workflows/release.yml); absent in source runs.
+    from _version import VERSION  # noqa: E402
+except ImportError:
+    VERSION = "dev"
+
 
 # ---------------------------- User settings ----------------------------
 ADC_REFERENCE_VOLTS = 5.0  # Classic Nano default ADC reference is AVcc (~5 V).
@@ -45,14 +50,19 @@ ZERO_WARNING_AFTER_SECONDS = 0.10
 BPM_STALE_SECONDS = 3.0  # Show "no data" if no B line arrived for this long.
 GSR_SHORT_MIN = 1020  # ADC at/above this means maxed at 5 V (short/wiring fault), as in the sketch.
 GSR_READING_STALE_SECONDS = 0.5  # GSR "readings: no" if no in-range sample for this long.
-OUTPUT_FOLDER = Path(__file__).resolve().parent / "measurements"
+# Frozen (PyInstaller) builds save next to the exe, not in the temp extraction folder.
+if getattr(sys, "frozen", False):
+    OUTPUT_FOLDER = Path(sys.executable).resolve().parent / "measurements"
+else:
+    OUTPUT_FOLDER = Path(__file__).resolve().parent / "measurements"
 # -----------------------------------------------------------------------
 
 
 class PolygraphApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("GSR Polygraph")
+        OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+        self.title(f"GSR Polygraph {VERSION}")
         self.geometry("800x560")
         self.minsize(700, 480)
         self.protocol("WM_DELETE_WINDOW", self.on_close)

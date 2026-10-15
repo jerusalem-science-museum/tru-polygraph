@@ -45,6 +45,7 @@ Electrical wiring in the building hums at 50 times per second (50 Hz), and the w
 | [csv-files.md](csv-files.md) | The files the app saves (`*_voltage.csv`, `*_questions.csv`, `*_bpm.csv`, and `_PARTIAL` variants): filename rules, every column, and how the three time columns relate |
 | [filters-gsr.md](filters-gsr.md) | The GSR cleaning chain in `gsr_filters.py` (20 ms mains-cancelling average plus a 5 Hz zero-phase low-pass), with parameters and the reasons for them |
 | [filters-heart-rate.md](filters-heart-rate.md) | The firmware heart-rate chain: finger detection, 0.7–3.5 Hz band-pass, inversion, adaptive-threshold peak detection, interval validation, and the lock / re-acquire state machine, plus what the app does with BPM |
+| [releasing.md](releasing.md) | How to publish a release so GitHub builds the Windows exe (and optionally Linux), where to find it, first-run notes, and where measurements are saved |
 
 Related documents elsewhere in the repo:
 

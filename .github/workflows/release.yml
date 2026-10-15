@@ -1,0 +1,60 @@
+name: Build release binary
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: polygraph-${{ github.event.release.tag_name }}-windows.exe
+          # Uncomment to also build for Linux Mint (Ubuntu-based).
+          # - os: ubuntu-latest
+          #   asset: polygraph-${{ github.event.release.tag_name }}-linux
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      ASSET: ${{ matrix.asset }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: python_app/requirements.txt
+
+      - name: Install tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python_app/requirements.txt pyinstaller
+
+      - name: Write version file
+        shell: bash
+        run: echo "VERSION = \"$TAG\"" > python_app/_version.py
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          # Console window is kept on purpose (shows errors); do not add --windowed.
+          BASE="${ASSET%.exe}"
+          pyinstaller --onefile --name "$BASE" --paths python_app python_app/polygraph_app.py
+          ls -l dist
+
+      - name: Upload asset to release
+        shell: bash
+        run: gh release upload "$TAG" "dist/$ASSET" --clobber
