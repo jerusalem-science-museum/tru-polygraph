@@ -9,7 +9,7 @@
 //                  s = stream mode (default, what the app reads)
 // Test mode is not remembered: opening the port resets the board into stream mode.
 //
-// The BPM algorithm is ported unchanged from bpm_detector/bpm_detector.ino
+// The BPM algorithm is ported unchanged from legacy/bpm_detector/bpm_detector.ino
 // (sample-count time base, biquad band-pass, adaptive peak detector, IBI validation).
 // The GSR tick has priority: the loop never blocks and drains at most one
 // MAX30102 sample per iteration.

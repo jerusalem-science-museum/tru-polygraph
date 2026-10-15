@@ -1,8 +1,8 @@
 """GSR noise diagnostics.
 
-    python app/gsr_diagnostics.py <voltage.csv> [--save out.png] [--show]
-    python app/gsr_diagnostics.py --selftest [--save out.png]
-    python app/gsr_diagnostics.py --port COM5 --seconds 30 [--save out.png]
+    python python_app/gsr_diagnostics.py <voltage.csv> [--save out.png] [--show]
+    python python_app/gsr_diagnostics.py --selftest [--save out.png]
+    python python_app/gsr_diagnostics.py --port COM5 --seconds 30 [--save out.png]
 
 Input CSV (written by polygraph_app.py): columns time_s, arduino_time_us,
 raw_adc, voltage_v.  Only voltage_v or raw_adc is required; the other columns

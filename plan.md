@@ -7,10 +7,10 @@ Work is split into four tasks. Tasks A, B and D run in parallel; task C runs aft
 
 | Task | todo item | Files owned | Depends on |
 |---|---|---|---|
-| A: combined firmware | (prereq for 1) | `polygraph/polygraph.ino`, `polygraph/README.md` | protocol below |
-| B: BPM in the app | 1, 2 | `app/gsr_polygraph.py` | protocol below |
-| C: answer UI + filter integration | 3 (+ wire in D) | `app/gsr_polygraph.py` | B and D finished |
-| D: noise diagnostics | 4 | `app/gsr_filters.py`, `app/gsr_diagnostics.py`, `app/NOISE_ANALYSIS.md` | none |
+| A: combined firmware | (prereq for 1) | `arduino/polygraph/polygraph.ino`, `arduino/polygraph/README.md` | protocol below |
+| B: BPM in the app | 1, 2 | `python_app/gsr_polygraph.py` | protocol below |
+| C: answer UI + filter integration | 3 (+ wire in D) | `python_app/gsr_polygraph.py` | B and D finished |
+| D: noise diagnostics | 4 | `python_app/gsr_filters.py`, `python_app/gsr_diagnostics.py`, `python_app/NOISE_ANALYSIS.md` | none |
 
 Only edit the files you own. Don't touch `CLAUDE.md`, `todo.md`, `plan.md` or the other sketches.
 
@@ -33,26 +33,26 @@ Rules:
 
 ---
 
-## Task A: combined firmware `polygraph/polygraph.ino`
+## Task A: combined firmware `arduino/polygraph/polygraph.ino`
 
 Goal: one sketch that streams GSR at exactly 500 Hz and runs the existing BPM detector, emitting the protocol above.
 
-1. Create `polygraph/polygraph.ino`. The folder name must match the file name, and it must be its own folder.
-2. Port the BPM detector from `bpm_detector/bpm_detector.ino` **unchanged in behaviour**: same constants, biquads, state machine, `handlePeak()`, and the sample-count time base (`t = sampleCount * SAMPLE_MS`). Remove the `t`/`p`/`q` modes and all `BEAT`/`STATUS`/plot printing. The only BPM output is the 1 Hz `B,...` line, using `state == LOCKED ? bpm : 0`.
-3. GSR sampling: keep the `previousMicros += 2000` scheduler from `checking_GSR/קוד/checking_GSR/checking_GSR.ino`, but take `t_us = micros()` right before `analogRead`. If the loop falls more than ~10 ms behind (e.g. a long stall), resync `previousMicros = now` instead of bursting catch-up samples, and count that event.
+1. Create `arduino/polygraph/polygraph.ino`. The folder name must match the file name, and it must be its own folder.
+2. Port the BPM detector from `arduino/legacy/bpm_detector/bpm_detector.ino` **unchanged in behaviour**: same constants, biquads, state machine, `handlePeak()`, and the sample-count time base (`t = sampleCount * SAMPLE_MS`). Remove the `t`/`p`/`q` modes and all `BEAT`/`STATUS`/plot printing. The only BPM output is the 1 Hz `B,...` line, using `state == LOCKED ? bpm : 0`.
+3. GSR sampling: keep the `previousMicros += 2000` scheduler from `arduino/legacy/checking_GSR/קוד/checking_GSR/checking_GSR.ino`, but take `t_us = micros()` right before `analogRead`. If the loop falls more than ~10 ms behind (e.g. a long stall), resync `previousMicros = now` instead of bursting catch-up samples, and count that event.
 4. Loop structure, in priority order: (a) GSR sample when due; (b) `sensor.check()` plus drain the FIFO **one sample per loop iteration**, so a GSR tick is never delayed by draining a big batch; (c) the 1 Hz B line. No `delay()` anywhere.
 5. Use `sensor.begin(Wire, I2C_SPEED_FAST)` (400 kHz). If it fails, print `# MAX3010x not found` and continue in GSR-only mode (`NO_SENSOR`).
 6. `setup()` prints `# polygraph ready` once.
 7. Timing self-check (optional but wanted): keep a counter of late GSR ticks (> 500 µs late) and of resyncs. Expose them only via a `#` line every 10 s, e.g. `# late=<n> resync=<n>`.
 8. RAM: the Uno has 2 KB. Use `F()` for all string literals and don't add buffers.
 9. Compile check: find `arduino-cli` (not on PATH; look under `%LOCALAPPDATA%\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe` or similar) and compile with `--fqbn arduino:avr:uno`. Report flash/RAM usage. If the SparkFun library isn't installed, install it with `arduino-cli lib install "SparkFun MAX3010x Pulse and Proximity Sensor Library"`. If no CLI exists, say so; don't fake a compile.
-10. Write `polygraph/README.md`: wiring for both sensors, the protocol table, and hardware notes (shared GND; MAX30102 LED current pulses on the 5 V rail can couple into the GSR reading, see task D).
+10. Write `arduino/polygraph/README.md`: wiring for both sensors, the protocol table, and hardware notes (shared GND; MAX30102 LED current pulses on the 5 V rail can couple into the GSR reading, see task D).
 
 Done when: it compiles for `arduino:avr:uno`, the code matches the protocol exactly, and the README exists.
 
 ---
 
-## Task B: BPM in the app (todo 1 + 2), file `app/gsr_polygraph.py`
+## Task B: BPM in the app (todo 1 + 2), file `python_app/gsr_polygraph.py`
 
 1. **Parsing.** Replace `parse_sample` with `parse_line(line) -> ("gsr", t_us, raw) | ("bpm", t_us, bpm, state) | ("comment", text)`. Raise `ValueError` for anything else. `detect_arduino()` must accept a port once it has seen ≥3 valid GSR lines; B and `#` lines must not reset the counter. Update the error text and module docstring to describe the protocol. Keep 115200 baud.
 2. **Reader thread.** Push `("sample", ...)`, `("bpm", (t_us, bpm, state, received_at))` events. Comments are dropped and are not counted as bad lines.
@@ -71,7 +71,7 @@ Don't touch the question-answer UI (`show_question_screen`, `mark_question` widg
 
 ---
 
-## Task C: answer UI (todo 3) + integrate D's filter, file `app/gsr_polygraph.py`
+## Task C: answer UI (todo 3) + integrate D's filter, file `python_app/gsr_polygraph.py`
 
 Runs after B and D. Read the file fresh.
 
@@ -85,26 +85,26 @@ Runs after B and D. Read the file fresh.
 4. `finish_measurement()`: a pending question with no answer is handled as now (ask whether to discard it).
 5. The truth screen shows `Subject's answer: Yes/No/Undefined`. Also add keyboard shortcuts there: `1` = Truth, `2` = Lie, `Enter` = save and continue.
 6. The CSV `subject_answer` column now holds `Yes`/`No`/`Undefined`.
-7. **Integrate task D**: replace `apply_50hz_notch_filter` usage with the recommended function from `app/gsr_filters.py` (read `app/NOISE_ANALYSIS.md` for which one and its signature). Keep the CSV column name `filtered_voltage_v` and update the plot title to describe the new filter. Use the Arduino-measured sample rate if D's function takes `fs`.
+7. **Integrate task D**: replace `apply_50hz_notch_filter` usage with the recommended function from `python_app/gsr_filters.py` (read `python_app/NOISE_ANALYSIS.md` for which one and its signature). Keep the CSV column name `filtered_voltage_v` and update the plot title to describe the new filter. Use the Arduino-measured sample rate if D's function takes `fs`.
 8. Verify: `python -m py_compile`, plus a scratchpad script that instantiates nothing GUI-heavy but checks the filter integration on synthetic data. If you can, construct `PolygraphApp` logic paths without a serial connection; at minimum, review the bindings carefully.
 
 ---
 
-## Task D: noise diagnostics (todo 4), files `app/gsr_filters.py`, `app/gsr_diagnostics.py`, `app/NOISE_ANALYSIS.md`
+## Task D: noise diagnostics (todo 4), files `python_app/gsr_filters.py`, `python_app/gsr_diagnostics.py`, `python_app/NOISE_ANALYSIS.md`
 
-Don't edit `app/gsr_polygraph.py` (B and C own it). Leads to investigate, verify, and explain in the analysis:
+Don't edit `python_app/gsr_polygraph.py` (B and C own it). Leads to investigate, verify, and explain in the analysis:
 
 - **Only 50 Hz is notched, but mains noise has harmonics.** At fs = 500 Hz, harmonics 100/150/200/250 Hz are in-band, and higher ones (350, 450, 550 ...) alias onto multiples of 50 Hz. A single notch leaves all of them.
 - **GSR is a very slow signal (< ~5 Hz).** A low-pass (e.g. 4th-order Butterworth at ~5 Hz, `sosfiltfilt`) or a 20 ms moving average (exactly one 50 Hz period, which nulls 50 Hz and *all* its harmonics) is much more effective than a notch. Compare these options quantitatively.
 - **Time base**: the app currently timestamps samples by PC arrival time, so samples come in bursts with duplicate or uneven times, and the plotted line looks jagged even when the signal isn't. (B fixes this; document it.) The Arduino timestamps (`arduino_time_us`) are the true sample times. Measure the real fs and jitter from them.
 - **Quantization**: 10-bit ADC at 5 V means 4.9 mV per LSB. Show the histogram of codes; ±1-2 LSB toggling looks like noise. Averaging/oversampling helps.
 - **Reference/supply noise**: the ADC reference is AVcc = USB 5 V (noisy, laptop charger ground loops). With the MAX30102 on the same board, its LED current pulses (up to 50 mA at 400 Hz) can ripple the rail; 400 Hz sampled at 500 Hz aliases to 100 Hz. List hardware mitigations (common GND star point, 100 nF + 10 µF decoupling at the sensor, an RC low-pass before A0, laptop on battery, a lower LED_BRIGHTNESS, a separate 3.3 V supply for the MAX30102).
-- **Motion/electrode artifacts and the analog front end**: describe these briefly as non-mains causes. Check `checking_GSR/קוד/gsr_checking.m` for what has already been tried.
-- Read `app/gsr_polygraph.py` and the GSR sketch for anything else that could cause noise, and report it.
+- **Motion/electrode artifacts and the analog front end**: describe these briefly as non-mains causes. Check `arduino/legacy/checking_GSR/קוד/gsr_checking.m` for what has already been tried.
+- Read `python_app/gsr_polygraph.py` and the GSR sketch for anything else that could cause noise, and report it.
 
 Deliverables:
-1. `app/gsr_filters.py`: pure functions on numpy arrays, no GUI. At least `notch_50(values, fs)`, `comb_notch_mains(values, fs, f0=50, harmonics=...)`, `lowpass(values, fs, cutoff_hz=5, order=4)` (zero-phase), `moving_average_mains(values, fs, f0=50)`, and **`clean_gsr(values, fs) -> np.ndarray`** (the recommended default, documented in its docstring). Also `estimate_fs(arduino_time_us)` (handles 32-bit wrap; returns the median-based fs). All functions return input unchanged (as an array) for too-short inputs, like the current `apply_50hz_notch_filter`.
-2. `app/gsr_diagnostics.py`: a CLI. `python app/gsr_diagnostics.py <voltage.csv>` reads the app's voltage CSV (columns `time_s`, `arduino_time_us`, `raw_adc`, `voltage_v`; tolerate missing optional columns). It produces one multi-panel figure, shown or saved with `--save out.png`:
+1. `python_app/gsr_filters.py`: pure functions on numpy arrays, no GUI. At least `notch_50(values, fs)`, `comb_notch_mains(values, fs, f0=50, harmonics=...)`, `lowpass(values, fs, cutoff_hz=5, order=4)` (zero-phase), `moving_average_mains(values, fs, f0=50)`, and **`clean_gsr(values, fs) -> np.ndarray`** (the recommended default, documented in its docstring). Also `estimate_fs(arduino_time_us)` (handles 32-bit wrap; returns the median-based fs). All functions return input unchanged (as an array) for too-short inputs, like the current `apply_50hz_notch_filter`.
+2. `python_app/gsr_diagnostics.py`: a CLI. `python app/gsr_diagnostics.py <voltage.csv>` reads the app's voltage CSV (columns `time_s`, `arduino_time_us`, `raw_adc`, `voltage_v`; tolerate missing optional columns). It produces one multi-panel figure, shown or saved with `--save out.png`:
    - raw vs each filter option (time domain, plus a zoomed 2 s window)
    - Welch PSD on a log scale, 0-250 Hz, with 50 Hz harmonics marked
    - spectrogram
@@ -114,6 +114,6 @@ Deliverables:
    It also prints a text report: measured fs, interval stats, dropped-sample count, the RMS in the bands 0-5 Hz / each 50·k Hz ±2 Hz / everything else, and the noise RMS (signal minus a 0.5 s median) before and after each filter, with a recommendation.
    
    `--selftest` generates synthetic data (a slow GSR drift, 50 Hz plus harmonics, white noise, quantization to 10 bits, timestamp jitter, and one 32-bit `micros()` wrap) and runs the whole report on it with the Agg backend. Optional `--port COMx --seconds N` live-captures N seconds from the Arduino (GSR lines only; ignore `B,` and `#` lines) and analyses it.
-3. `app/NOISE_ANALYSIS.md`: findings, ranked by likely impact, each with evidence (cite code lines), how to confirm with the diagnostics tool, and the fix (software and hardware). End with the recommended `clean_gsr` choice and its exact signature, for task C.
+3. `python_app/NOISE_ANALYSIS.md`: findings, ranked by likely impact, each with evidence (cite code lines), how to confirm with the diagnostics tool, and the fix (software and hardware). End with the recommended `clean_gsr` choice and its exact signature, for task C.
 
 Verify: run `--selftest` with `--save` into your scratchpad and look at the PNG (use the Read tool on it). Install deps with `python -m pip install --user numpy scipy matplotlib pyserial` if missing.

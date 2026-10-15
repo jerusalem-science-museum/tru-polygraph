@@ -1,6 +1,6 @@
 # polygraph (combined GSR + heart-rate firmware)
 
-One Arduino Uno/Nano sketch (`polygraph.ino`) that streams a GSR sensor at 500 Hz and runs the MAX30102 BPM detector from `bpm_detector/bpm_detector.ino` (same algorithm and constants), over one USB serial link at **115200 baud**.
+One Arduino Uno/Nano sketch (`polygraph.ino`) that streams a GSR sensor at 500 Hz and runs the MAX30102 BPM detector from `legacy/bpm_detector/bpm_detector.ino` (same algorithm and constants), over one USB serial link at **115200 baud**.
 
 Library: **SparkFun MAX3010x Pulse and Proximity Sensor Library**.
 
@@ -27,7 +27,7 @@ ASCII, one record per line, ending in `\r\n`.
 
 | Line | Rate | Meaning |
 |---|---|---|
-| `<t_us>,<raw_adc>` | 500 Hz | GSR sample. `t_us` = `micros()` just before `analogRead(A0)`; `raw_adc` = 0..1023. Same format as `checking_GSR.ino`. |
+| `<t_us>,<raw_adc>` | 500 Hz | GSR sample. `t_us` = `micros()` just before `analogRead(A0)`; `raw_adc` = 0..1023. Same format as `legacy/checking_GSR/.../checking_GSR.ino`. |
 | `B,<t_us>,<bpm>,<state>` | 1 Hz | Heart rate. `t_us` = `micros()` at emission. `bpm` is an integer, `0` when not locked. `state` is `NO_FINGER`, `SETTLING`, `ACQUIRING`, `LOCKED` or `NO_SENSOR`. |
 | `# <text>` | rare | Comments: `# polygraph ready` at startup, `# MAX3010x not found`, and `# late=<n> resync=<n> hr=<n>` every 10 s (`hr` = MAX30102 samples read in those 10 s, expect ~1000; near 0 means the sensor is being starved). Parsers should ignore these. |
 
@@ -65,4 +65,4 @@ A `beat` line is printed for every accepted heartbeat. `sps` should be about 500
 ## Hardware notes
 
 - Keep a common GND. The ADC reference is the 5 V rail (USB), so rail noise appears in the GSR reading.
-- The MAX30102 LED current pulses (up to 50 mA, here `LED_BRIGHTNESS` 60 at 400 Hz) can ripple the 5 V rail and couple into GSR. A 400 Hz ripple sampled at 500 Hz aliases to 100 Hz. Mitigations: 100 nF + 10 uF decoupling at the MAX30102, an RC low-pass before `A0`, a lower `LED_BRIGHTNESS`, powering the MAX30102 from a separate 3.3 V supply, running the laptop on battery. See the noise analysis in `app/NOISE_ANALYSIS.md`.
+- The MAX30102 LED current pulses (up to 50 mA, here `LED_BRIGHTNESS` 60 at 400 Hz) can ripple the 5 V rail and couple into GSR. A 400 Hz ripple sampled at 500 Hz aliases to 100 Hz. Mitigations: 100 nF + 10 uF decoupling at the MAX30102, an RC low-pass before `A0`, a lower `LED_BRIGHTNESS`, powering the MAX30102 from a separate 3.3 V supply, running the laptop on battery. See the noise analysis in `python_app/NOISE_ANALYSIS.md`.

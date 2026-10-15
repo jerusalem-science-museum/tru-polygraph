@@ -2,10 +2,10 @@
 
 Question: the code "filters 50 Hz" but the data still looks noisy. Why, and what do we do?
 
-Line numbers refer to the files as of commit `6ee6879` (`app/gsr_polygraph.py`, `checking_GSR/קוד/checking_GSR/checking_GSR.ino`); the app is being edited, so search by the quoted symbol if lines have moved.
+Line numbers refer to the files as of commit `6ee6879` (`python_app/gsr_polygraph.py`, `checking_GSR/קוד/checking_GSR/checking_GSR.ino`); the app is being edited, so search by the quoted symbol if lines have moved.
 
-Tools: `app/gsr_filters.py` (filters), `app/gsr_diagnostics.py` (analysis).
-All numbers below come from `python app/gsr_diagnostics.py --selftest` (60 s of synthetic data, 500 Hz, 10-bit, 50.15 Hz mains with harmonics 1-10 of 40/12/15/6/8/3/4/2/3/2 mV, 6 mV 400 Hz rail ripple, 0.8 LSB white noise, timestamp jitter plus rare 1-3 ms stalls, one `micros()` wrap). They are model results, not measurements of your hardware; confirm each finding on a real recording with the "Confirm" step.
+Tools: `python_app/gsr_filters.py` (filters), `python_app/gsr_diagnostics.py` (analysis).
+All numbers below come from `python python_app/gsr_diagnostics.py --selftest` (60 s of synthetic data, 500 Hz, 10-bit, 50.15 Hz mains with harmonics 1-10 of 40/12/15/6/8/3/4/2/3/2 mV, 6 mV 400 Hz rail ripple, 0.8 LSB white noise, timestamp jitter plus rare 1-3 ms stalls, one `micros()` wrap). They are model results, not measurements of your hardware; confirm each finding on a real recording with the "Confirm" step.
 
 ## Findings, ranked by likely impact
 
@@ -62,8 +62,8 @@ Fix: shielded/twisted cable, buffered front end (op-amp follower or the module's
 ## How to confirm everything on real data
 
 ```
-python app/gsr_diagnostics.py app/measurements/<name>_voltage.csv --save out.png
-python app/gsr_diagnostics.py --port COM5 --seconds 30 --save live.png
+python python_app/gsr_diagnostics.py python_app/measurements/<name>_voltage.csv --save out.png
+python python_app/gsr_diagnostics.py --port COM5 --seconds 30 --save live.png
 ```
 Do four captures of 30 s each and compare the report: (a) electrodes on the hand, MAX30102 running; (b) same with MAX30102 unplugged; (c) electrodes shorted together with a resistor (e.g. 100 kOhm, hand away from the cable); (d) laptop on battery. The difference (a)-(b) is the LED/rail coupling; (c) is the electronic floor; (d) is the ground-loop part.
 
