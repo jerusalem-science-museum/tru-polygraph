@@ -30,8 +30,8 @@ Note for educators: a reaction shows arousal (surprise, worry, embarrassment, ex
 1. **Sensors.** The GSR sensor turns skin conductance into a voltage. The heart-rate sensor measures reflected infrared light.
 2. **Arduino** (a small microcontroller board). It reads the GSR voltage 500 times per second. It reads the light sensor 100 times per second, finds the heartbeats itself, and works out the heart rate once per second.
 3. **USB cable.** The Arduino sends all of this to the laptop as lines of text.
-4. **Laptop app.** The operator types the visitor's name, waits through a short rest period, then presses a key each time a question is asked and another key for the visitor's answer (Yes / No / Undefined). At the end the operator marks each answer as Truth or Lie.
-5. **Files and graph.** The app saves three spreadsheet files (CSV) and shows a graph. The top graph is the skin-conductance signal after electrical interference is cleaned out, and the bottom graph is the heart rate. Each question is a dashed line: green for Truth, red for Lie, grey if it was not classified.
+4. **Laptop app.** The operator types the visitor's name, waits through a short rest period, then reads out each question shown on screen (the list is in `config.toml`), pressing a key when it is asked and another key for the visitor's answer (Yes / No / Undefined). After the last question the operator marks each answer as Truth or Lie.
+5. **Files, summary and graph.** As soon as the last answer is marked, the app saves three spreadsheet files (CSV) and shows one screen with a summary table on the left and a graph on the right. The table lists every question with the visitor's answer and the polygraph's prediction and certainty. The prediction and certainty are random placeholders until a classifier exists, and they are not saved. The top graph is the skin-conductance signal after electrical interference is cleaned out, and the bottom graph is the heart rate. Each question is a dashed line: green for Truth, red for Lie, grey if it was not classified.
 
 ### Why the signal needs "cleaning"
 

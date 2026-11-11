@@ -52,7 +52,8 @@ jobs:
         run: |
           # Console window is kept on purpose (shows errors); do not add --windowed.
           BASE="${ASSET%.exe}"
-          pyinstaller --onefile --name "$BASE" --paths python_app python_app/main.py
+          # config.toml is bundled so the exe can write it next to itself on first launch.
+          pyinstaller --onefile --name "$BASE" --paths python_app --add-data "python_app/config.toml:." python_app/main.py
           ls -l dist
 
       - name: Upload asset to release

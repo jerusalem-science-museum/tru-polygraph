@@ -31,11 +31,29 @@ ASCII, one record per line, ending in `\r\n`.
 |---|---|---|
 | `<t_us>,<raw_adc>` | 500 Hz | GSR sample. `t_us` = `micros()` just before `analogRead(A0)`; `raw_adc` = 0..1023. Same format as `legacy/checking_GSR/.../checking_GSR.ino`. |
 | `B,<t_us>,<bpm>,<state>` | 1 Hz | Heart rate. `t_us` = `micros()` at emission. `bpm` is an integer, `0` when not locked. `state` is `NO_FINGER`, `SETTLING`, `ACQUIRING`, `LOCKED` or `NO_SENSOR`. |
-| `# <text>` | rare | Comments: `# polygraph ready` at startup, `# MAX3010x not found`, and `# late=<n> resync=<n> hr=<n>` every 10 s (`hr` = MAX30102 samples read in those 10 s, expect ~1000; near 0 means the sensor is being starved). Parsers should ignore these. |
+| `# <text>` | rare | Comments: `# polygraph ready` at startup, `# MAX3010x not found`, and `# late=<n> resync=<n> hr=<n>` every 10 s (`hr` = MAX30102 samples read in those 10 s, expect ~1000; near 0 means the sensor is being starved), and the `# i2c` boot check (see below). Parsers should ignore these. |
 
 `t_us` is the raw 32-bit `micros()` and wraps every ~71.6 min; the PC side must unwrap it.
 
 If the MAX30102 is not found, the sketch keeps streaming GSR and sends `B,<t_us>,0,NO_SENSOR` once a second.
+
+## I2C boot check
+
+At startup the sketch tries the sensor twice, then clears the bus (nine SCL clocks and a STOP) and tries twice more. It prints the result once at boot and repeats it every 10 s in stream mode, because the app discards anything sent during the reset. The app appends the first copy of each connection to `measurements/i2c_boot.log`.
+
+```
+# i2c f=3290,3291 p=3480,3481 t=1 e=0 id=15 c=- OK
+```
+
+| Field | Meaning |
+|---|---|
+| `f=<sda>,<scl>` | Idle bus in mV before Wire starts, with only the module's pull-ups: this is the module's pull-up voltage. Near 0 with `p` near 5000 means nothing is pulling the lines up (sensor absent or unpowered). |
+| `p=<sda>,<scl>` | Idle bus in mV with the AVR pull-ups added. SDA near 0 here means something is holding the bus low at boot. |
+| `t=<n>` | Attempts made (1 to 4). 1 or 2 worked without a bus clear. |
+| `e=<n>` | `Wire.endTransmission()` code of the last attempt: 0 = answered, 2 = no answer to its address, 4 = bus error, 5 = timeout. |
+| `id=<hex>` | Part ID read on the last attempt, expect `15`. |
+| `c=` | `-` = bus clear not needed, a number = SCL clocks until SDA was released (0 = it was already high), `x` = SDA stayed low through all nine clocks. |
+| `OK` / `FAIL` | Whether the sensor started. |
 
 ## Test mode (checking the sensors by hand)
 

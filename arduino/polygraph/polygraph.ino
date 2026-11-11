@@ -3,7 +3,7 @@
 // Serial protocol (115200 baud, one record per line, see README.md):
 //   <t_us>,<raw_adc>            500 Hz GSR sample (t_us = micros() just before analogRead)
 //   B,<t_us>,<bpm>,<state>      1 Hz heart rate (bpm 0 unless LOCKED)
-//   # <text>                    info / comments
+//   # <text>                    info / comments (includes the "# i2c" boot check, see README.md)
 //
 // Serial commands: t = test mode (human-readable 1 s summary per sensor, stream off)
 //                  s = stream mode (default, what the app reads)
@@ -35,6 +35,18 @@ const uint32_t I2C_GUARD_US   = 700;
 uint32_t nextGsrCheck = 0;                 // previousMicros of the original scheduler
 uint32_t lastSensorPoll = 0;
 uint32_t lateTicks = 0, resyncs = 0;
+
+// ---- I2C boot check (see startSensor) ----
+const uint32_t I2C_TIMEOUT_US = 3000;      // a stuck bus must not freeze the GSR stream
+const byte     I2C_TRIES      = 2;         // attempts before, then again after, the bus clear
+const byte     I2C_RETRY_MS   = 20;
+const int      I2C_LOW_RAW    = 205;       // ~1 V: below this a line counts as held low
+const byte     CLEAR_NOT_RUN  = 254;
+const byte     CLEAR_STUCK    = 255;
+int  sdaFloatMv = 0, sclFloatMv = 0;       // idle lines, only the module's own pull-ups
+int  sdaPullMv = 0, sclPullMv = 0;         // idle lines, with the AVR pull-ups added
+byte i2cTries = 0, i2cErr = 0, i2cId = 0;  // last endTransmission() code and part ID read
+byte i2cClear = CLEAR_NOT_RUN;             // SCL clocks until SDA was released
 
 // ---- test mode (see printTestReport) ----
 const int GSR_OPEN_MAX    = 0;             // reads 0 -> electrodes open / finger off
@@ -337,11 +349,110 @@ void handleSerial() {
   }
 }
 
+// A4/A5 are also ADC inputs, so the real bus voltage can be read without a meter.
+int lineMv(byte pin) {
+  analogRead(pin);                               // first conversion after a mux change is unreliable
+  return (long)analogRead(pin) * 5000L / 1023L;
+}
+
+bool lineHigh(byte pin) {
+  return analogRead(pin) >= I2C_LOW_RAW;         // digitalRead would misread a 1.8 V pull-up as low
+}
+
+void measureBusIdle() {
+  pinMode(SDA, INPUT);
+  pinMode(SCL, INPUT);
+  delay(1);
+  sdaFloatMv = lineMv(SDA);
+  sclFloatMv = lineMv(SCL);
+  pinMode(SDA, INPUT_PULLUP);
+  pinMode(SCL, INPUT_PULLUP);
+  delay(1);
+  sdaPullMv = lineMv(SDA);
+  sclPullMv = lineMv(SCL);
+}
+
+void driveLow(byte pin) {
+  digitalWrite(pin, LOW);
+  pinMode(pin, OUTPUT);
+}
+
+void releaseLine(byte pin) {
+  pinMode(pin, INPUT_PULLUP);
+  delayMicroseconds(10);
+}
+
+// A reset in the middle of a read can leave the sensor waiting to finish a byte and
+// holding SDA low. Nine clocks let it finish, then a STOP returns it to idle.
+// Returns the clocks needed to release SDA (0 = was already high) or CLEAR_STUCK.
+byte clearBus() {
+  releaseLine(SDA);
+  releaseLine(SCL);
+  byte released = lineHigh(SDA) ? 0 : CLEAR_STUCK;
+  for (byte i = 1; i <= 9; i++) {
+    driveLow(SCL);
+    delayMicroseconds(10);
+    releaseLine(SCL);
+    if (released == CLEAR_STUCK && lineHigh(SDA)) released = i;
+  }
+  driveLow(SCL);
+  delayMicroseconds(10);
+  driveLow(SDA);
+  delayMicroseconds(10);
+  releaseLine(SCL);
+  releaseLine(SDA);
+  return released;
+}
+
+bool trySensor() {
+  bool ok = sensor.begin(Wire, I2C_SPEED_FAST);
+  Wire.beginTransmission(MAX30105_ADDRESS);
+  i2cErr = Wire.endTransmission();
+  i2cId = sensor.readPartID();
+  i2cTries++;
+  return ok;
+}
+
+// Tries the sensor as a plain boot would, then again after a bus clear, recording
+// which step worked so a failure can be diagnosed from the "# i2c" line.
+bool startSensor() {
+  measureBusIdle();
+  Wire.setWireTimeout(I2C_TIMEOUT_US, true);
+  for (byte i = 0; i < I2C_TRIES; i++) {
+    if (trySensor()) return true;
+    delay(I2C_RETRY_MS);
+  }
+  Wire.end();
+  i2cClear = clearBus();
+  for (byte i = 0; i < I2C_TRIES; i++) {
+    if (trySensor()) return true;
+    delay(I2C_RETRY_MS);
+  }
+  return false;
+}
+
+// Kept short: it shares the 64-byte TX buffer with the 500 Hz stream.
+void printI2cBootReport() {
+  Serial.print(F("# i2c f=")); Serial.print(sdaFloatMv);
+  Serial.print(','); Serial.print(sclFloatMv);
+  Serial.print(F(" p=")); Serial.print(sdaPullMv);
+  Serial.print(','); Serial.print(sclPullMv);
+  Serial.print(F(" t=")); Serial.print(i2cTries);
+  Serial.print(F(" e=")); Serial.print(i2cErr);
+  Serial.print(F(" id=")); Serial.print(i2cId, HEX);
+  Serial.print(F(" c="));
+  if (i2cClear == CLEAR_NOT_RUN)     Serial.print('-');
+  else if (i2cClear == CLEAR_STUCK)  Serial.print('x');
+  else                               Serial.print(i2cClear);
+  Serial.println(sensorOk ? F(" OK") : F(" FAIL"));
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println(F("# polygraph ready (send t = test mode, s = stream mode)"));
 
-  sensorOk = sensor.begin(Wire, I2C_SPEED_FAST);
+  sensorOk = startSensor();
+  printI2cBootReport();
   if (sensorOk) {
     sensor.setup(LED_BRIGHTNESS, SAMPLE_AVERAGE, LED_MODE, SAMPLE_RATE, PULSE_WIDTH, ADC_RANGE);
     sensor.setPulseAmplitudeRed(0x0A);          // red unused for BPM; keep it dim
@@ -357,6 +468,7 @@ void setup() {
 
 void loop() {
   static uint32_t lastB = 0, lastDiag = 0;
+  static bool i2cLinePending = false;
   uint32_t now = micros();
 
   // (a) GSR sample when due. Highest priority.
@@ -436,5 +548,9 @@ void loop() {
     Serial.print(F(" hr="));                     // HR samples in the last ~10 s (expect ~1000)
     Serial.println(hrCount);
     hrCount = 0;
+    i2cLinePending = true;                       // repeated: the app flushes the boot-time copy
+  } else if (i2cLinePending) {
+    i2cLinePending = false;
+    printI2cBootReport();
   }
 }

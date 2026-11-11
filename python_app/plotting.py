@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import csv
+import warnings
 from pathlib import Path
 
 import gsr_filters
 from arduino import SAMPLE_RATE_HZ
+
+# Matplotlib warns if a redraw happens while the pane is very narrow, e.g. mid-resize. Harmless.
+warnings.filterwarnings("ignore", message="Tight layout not applied")
 
 
 def plot_examination(
@@ -14,9 +18,13 @@ def plot_examination(
     questions_csv: str | Path,
     bpm_csv: str | Path | None = None,
     subject_name: str = "",
-) -> None:
-    """Plot GSR voltage and heart rate over time and mark every question."""
-    import matplotlib.pyplot as plt
+):
+    """Build the GSR and heart-rate figure with every question marked, and save it as a PNG.
+
+    Returns a matplotlib Figure for the caller to display. The PNG is written here, before
+    the caller embeds the figure and resizes it to fit the window.
+    """
+    from matplotlib.figure import Figure
 
     voltage_csv = Path(voltage_csv)
     questions_csv = Path(questions_csv)
@@ -76,11 +84,12 @@ def plot_examination(
                     bpm_values.append(bpm if bpm > 0 else float("nan"))
     has_bpm = any(value == value for value in bpm_values)  # any non-NaN value
 
-    figure, (axis, bpm_axis) = plt.subplots(
+    # layout="tight" re-applies on every draw, so the graph stays tidy when the window resizes.
+    figure = Figure(figsize=(13, 8), layout="tight")
+    axis, bpm_axis = figure.subplots(
         2,
         1,
         sharex=True,
-        figsize=(13, 8),
         gridspec_kw={"height_ratios": [3, 2]},
     )
     axis.plot(
@@ -167,7 +176,6 @@ def plot_examination(
     bpm_axis.set_ylabel("Heart rate (BPM)")
     bpm_axis.grid(True, alpha=0.25)
     bpm_axis.margins(y=0.15)
-    figure.tight_layout()
 
     # Save the graph next to the CSVs: <stem>_voltage.csv -> <stem>_plot.png.
     stem = voltage_csv.stem
@@ -179,4 +187,4 @@ def plot_examination(
     except Exception as error:  # A failed save must not stop the plot from showing.
         print(f"Could not save the graph image {png_path}: {error}")
 
-    plt.show()
+    return figure

@@ -62,13 +62,14 @@ Emitted by `printBpmLine()`.
 
 ### 3. Comment lines: `# <text>`
 
-Every line starting with `#` is informational. The app's `parse_line()` returns `("comment", ...)`, and `serial_reader()` drops it without counting it as a bad line.
+Every line starting with `#` is informational. The app's `parse_line()` returns `("comment", ...)`, and `serial_reader()` drops it without counting it as a bad line. The one exception is the first `# i2c` line of each connection, which is also appended to `measurements/i2c_boot.log`.
 
 | Line | When | Fields |
 |---|---|---|
 | `# polygraph ready (send t = test mode, s = stream mode)` | Once at startup (`setup()`) | |
 | `# MAX3010x not found` | Once at startup if the heart-rate sensor is missing | Followed by `B,…,0,NO_SENSOR` lines every second |
 | `# late=<n> resync=<n> hr=<n>` | Every 10 s in stream mode (`ms - lastDiag >= 10000`). The first one comes about 10 s after boot. It is sent on a different loop iteration from the `B` line. | `late`: GSR ticks more than 500 µs late, **cumulative since boot**. `resync`: schedule resyncs (gaps), cumulative since boot. `hr`: MAX30102 samples processed **since the previous diagnostic line**; expect about 1000 (100 Hz × 10 s). Near 0 means the sensor is starved or missing (always 0 with `NO_SENSOR`). |
+| `# i2c f=<mV>,<mV> p=<mV>,<mV> t=<n> e=<n> id=<hex> c=<-\|n\|x> OK\|FAIL` | Once at startup, then every 10 s in stream mode | Result of the sensor start-up check. Field meanings are in [arduino/polygraph/README.md](../arduino/polygraph/README.md#i2c-boot-check). |
 | `# TEST MODE: one GSR and one HR line per second. Send s to go back to stream mode.` | After `t` is received | Preceded by one empty line |
 | `# stream mode` | After `s` is received in test mode | |
 

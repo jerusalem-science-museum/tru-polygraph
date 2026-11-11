@@ -1,0 +1,57 @@
+# Polygraph settings. Edit this file and restart the app; save it as UTF-8 (Hebrew is fine).
+# The app reports a clear error at startup if a setting is missing or invalid.
+
+# ------------------------------ Examination ------------------------------
+# Asked in this order. The examination moves on to classification after the last one.
+# PLACEHOLDER questions: replace with the real ones.
+questions = [
+    "Is your name what you told us?",
+    "Have you ever told a lie?",
+    "Did you enjoy your visit today?",
+    "Have you been to this museum before?",
+    "Do you like chocolate?",
+    "Have you ever cheated in a game?",
+    "Did you have breakfast this morning?",
+    "Are you afraid of the dark?",
+]
+
+# Choices for the subject's answer, selected with keys 1, 2, 3, ... (at most 9).
+answer_choices = ["Yes", "No", "Undefined"]
+
+# Prefilled on the setup screen; the operator can change them there.
+default_rest_seconds = 30
+default_test_seconds = 300
+
+# GSR recovery time the operator should wait between questions.
+min_question_gap_seconds = 10
+
+# ------------------------------- Sensors ---------------------------------
+# Classic Nano default ADC reference is AVcc (~5 V).
+adc_reference_volts = 5.0
+
+# ADC at or above this means the input is maxed at 5 V (short or wiring fault).
+gsr_short_min = 1020
+
+# GSR shows "readings: no" if no in-range sample arrived for this long.
+gsr_reading_stale_seconds = 0.5
+
+# Heart rate shows "no data" if no reading arrived for this long.
+bpm_stale_seconds = 3.0
+
+# The recording is stopped as failed if no valid data arrived for this long.
+serial_timeout_seconds = 2.0
+
+# Warn that a finger may be off after the GSR reads 0 V for this long.
+zero_warning_after_seconds = 0.10
+
+# ------------------------------ Keys and display -------------------------
+# Ignore a repeated key press within this time.
+mark_debounce_seconds = 0.25
+
+# Extra time that keys are ignored when a new screen appears, so a held key can't act on it.
+screen_change_lockout_seconds = 0.5
+
+# Colours and duration of the banner flashed when Truth or Lie is registered.
+truth_flash_color = "#2e7d32"
+lie_flash_color = "#c62828"
+flash_ms = 400

@@ -21,8 +21,8 @@ Folder: `python_app/measurements/` (`OUTPUT_FOLDER`). The folder is gitignored e
   - the window was closed during the rest or question phase and the operator chose **Yes** (save) in the dialog (`on_close()`).
 
   A partial save contains everything recorded up to that point. A question that was marked but not yet answered is left out. `answer_type` is empty because the Truth/Lie classification only happens after a normal finish.
-- A normal finish (timer runs out, or **Finish examination** followed by Truth/Lie classification and **Save examination**) writes the files without a suffix. If no question was saved, the app asks whether to save the recording anyway. If the operator agrees, the questions file has only its header row.
-- After a normal finish the app also shows the examination graph and saves it as `<subject>_<YYYY-MM-DD>_<HH-MM-SS>_plot.png` in the same folder (`plotting.py`, 150 dpi). Partial saves are not plotted, so they have no PNG.
+- A normal finish (the last question is answered, the timer runs out, or **Finish examination**, followed by Truth/Lie classification) writes the files without a suffix as soon as the last answer is classified. If no question was saved, the app asks whether to save the recording anyway. If the operator agrees, the questions file has only its header row.
+- After a normal finish the app also shows the examination graph beside the summary table and saves the graph as `<subject>_<YYYY-MM-DD>_<HH-MM-SS>_plot.png` in the same folder (`plotting.py`, 150 dpi). Partial saves are not plotted, so they have no PNG.
 
 All three files are written with `csv.writer`, encoded as UTF-8 **with BOM** (`utf-8-sig`) so Excel shows Hebrew names correctly, with a header row and comma separators. Floating-point times and voltages have 6 decimals.
 

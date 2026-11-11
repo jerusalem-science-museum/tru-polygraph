@@ -7,12 +7,15 @@ and question marks all share one Arduino-based clock (see PolygraphApp).
 from __future__ import annotations
 
 import queue
+import random
 import sys
 import threading
 import time
 import tkinter as tk
+import unicodedata
 from datetime import datetime
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 import serial
@@ -31,6 +34,25 @@ from records import (  # noqa: E402
     save_examination,
 )
 from plotting import plot_examination  # noqa: E402
+from config import (  # noqa: E402
+    ADC_REFERENCE_VOLTS,
+    ANSWER_CHOICES,
+    BPM_STALE_SECONDS,
+    DEFAULT_REST_SECONDS,
+    DEFAULT_TEST_SECONDS,
+    FLASH_MS,
+    GSR_READING_STALE_SECONDS,
+    GSR_SHORT_MIN,
+    LIE_FLASH_COLOR,
+    MARK_DEBOUNCE_SECONDS,
+    MIN_QUESTION_GAP_SECONDS,
+    OUTPUT_FOLDER,
+    QUESTION_TEXTS,
+    SCREEN_CHANGE_LOCKOUT_SECONDS,
+    SERIAL_TIMEOUT_SECONDS,
+    TRUTH_FLASH_COLOR,
+    ZERO_WARNING_AFTER_SECONDS,
+)
 
 try:  # Written by the release build (.github/workflows/release.yml); absent in source runs.
     from _version import VERSION  # noqa: E402
@@ -38,27 +60,50 @@ except ImportError:
     VERSION = "dev"
 
 
-# ---------------------------- User settings ----------------------------
-ADC_REFERENCE_VOLTS = 5.0  # Classic Nano default ADC reference is AVcc (~5 V).
-ANSWER_CHOICES = ("Yes", "No", "Undefined")  # Keys 1, 2, 3.
-MARK_DEBOUNCE_SECONDS = 0.25  # Ignore a key-repeat Enter right after an answer is saved.
-MIN_QUESTION_GAP_SECONDS = 10  # GSR recovery time before the next question.
-DEFAULT_REST_SECONDS = 30
-DEFAULT_TEST_SECONDS = 300
-SERIAL_TIMEOUT_SECONDS = 2.0
-ZERO_WARNING_AFTER_SECONDS = 0.10
-BPM_STALE_SECONDS = 3.0  # Show "no data" if no B line arrived for this long.
-GSR_SHORT_MIN = 1020  # ADC at/above this means maxed at 5 V (short/wiring fault), as in the sketch.
-GSR_READING_STALE_SECONDS = 0.5  # GSR "readings: no" if no in-range sample for this long.
-TRUTH_FLASH_COLOR = "#2e7d32"  # Banner colour flashed when Truth is registered.
-LIE_FLASH_COLOR = "#c62828"  # Banner colour flashed when Lie is registered.
-FLASH_MS = 400  # How long the Truth/Lie banner stays coloured.
-# Frozen (PyInstaller) builds save next to the exe, not in the temp extraction folder.
-if getattr(sys, "frozen", False):
-    OUTPUT_FOLDER = Path(sys.executable).resolve().parent / "measurements"
-else:
-    OUTPUT_FOLDER = Path(__file__).resolve().parent / "measurements"
-# -----------------------------------------------------------------------
+ANSWER_HINT = ", ".join(f"{number} = {choice}" for number, choice in enumerate(ANSWER_CHOICES, start=1))
+QUESTION_WRAP_PIXELS = 640
+RLE, PDF = chr(0x202B), chr(0x202C)  # Unicode marks: start and end of right-to-left text.
+
+
+def log_i2c_boot(text: str) -> None:
+    """Keep the firmware's sensor start-up check, so failed boots can be compared later."""
+    entry = f"{datetime.now():%Y-%m-%d %H:%M:%S} {text}"
+    print(entry)
+    try:
+        with open(OUTPUT_FOLDER / "i2c_boot.log", "a", encoding="ascii") as log_file:
+            log_file.write(entry + "\n")
+    except OSError as exc:
+        print(f"Could not write i2c_boot.log: {exc}")
+
+
+def is_rtl(text: str) -> bool:
+    """True if the first strongly directional character is right-to-left (Hebrew, Arabic)."""
+    for character in text:
+        direction = unicodedata.bidirectional(character)
+        if direction in ("R", "AL"):
+            return True
+        if direction == "L":
+            return False
+    return False
+
+
+def wrap_rtl(text: str, font: tkfont.Font, width: int) -> str:
+    """Break right-to-left text into lines no wider than width, each marked as right-to-left.
+
+    Tk draws every line as a separate left-to-right paragraph, which misplaces punctuation and
+    Latin words. The marks must be on each line, so Tk's own wraplength can't be used here.
+    """
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if current and font.measure(candidate) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    lines.append(current)
+    return "\n".join(f"{RLE}{line}{PDF}" for line in lines)
 
 
 class PolygraphApp(tk.Tk):
@@ -133,6 +178,7 @@ class PolygraphApp(tk.Tk):
         self.q_flash_after: str | None = None
         self.truth_flash_after: str | None = None
         self.truth_flash_label: tk.Label | None = None
+        self.question_font = tkfont.Font(family="Segoe UI", size=22, weight="bold")
         self.style.configure("Q.TFrame", background=self.q_neutral_bg)
         self.style.configure("Q.TLabel", background=self.q_neutral_bg, foreground="#202020")
         self.style.configure("Q.TRadiobutton", background=self.q_neutral_bg, foreground="#202020")
@@ -232,6 +278,7 @@ class PolygraphApp(tk.Tk):
         # Keep a local reference: close_serial() sets self.connection to None.
         connection = self.connection
         assert connection is not None
+        i2c_logged = False
         while not self.stop_reader.is_set():
             try:
                 data = connection.readline()
@@ -246,7 +293,10 @@ class PolygraphApp(tk.Tk):
                         self.serial_events.put(
                             ("bpm", (parsed[1], parsed[2], parsed[3], received_at))
                         )
-                    # Comment lines are dropped and are not counted as bad lines.
+                    elif not i2c_logged and parsed[1].startswith("i2c "):
+                        i2c_logged = True
+                        log_i2c_boot(parsed[1])
+                    # Other comment lines are dropped and are not counted as bad lines.
                 except (UnicodeDecodeError, ValueError):
                     self.serial_events.put(("bad_line", None))
             except (OSError, SerialException, TypeError, AttributeError) as exc:
@@ -406,8 +456,9 @@ class PolygraphApp(tk.Tk):
         self.state_banner.pack(pady=(6, 0))
         self.gap_label = ttk.Label(self.container, text="", style="QGapWait.TLabel")
         self.gap_label.pack(pady=(2, 0))
-        self.question_label = ttk.Label(self.container, text="Question 1", style="QQuestion.TLabel")
+        self.question_label = ttk.Label(self.container, style="QQuestion.TLabel", justify="center")
         self.question_label.pack(pady=(6, 6))
+        self.show_question_text(self.question_label, 1)
         action_row = ttk.Frame(self.container, style="Q.TFrame")
         action_row.pack(pady=4)
         self.mark_button = ttk.Button(
@@ -443,7 +494,7 @@ class PolygraphApp(tk.Tk):
         ttk.Label(
             self.container,
             text="Press Space or Enter (or click) when the question is asked. "
-            "Then press 1 = Yes, 2 = No, 3 = Undefined. Backspace = undo.",
+            f"Then press {ANSWER_HINT}. Backspace = undo.",
             style="Q.TLabel",
             wraplength=640,
             justify="center",
@@ -470,6 +521,14 @@ class PolygraphApp(tk.Tk):
             handlers[f"<KP_{number}>"] = lambda _e, c=choice: self.answer_by_key(c)
         self.bind_keys(handlers)
         self.update_test_timer()
+
+    def show_question_text(self, label: ttk.Label, number: int) -> None:
+        """Show the wording of question `number` on a large label, wrapped for its direction."""
+        text = QUESTION_TEXTS[number - 1]
+        if is_rtl(text):
+            label.config(text=wrap_rtl(text, self.question_font, QUESTION_WRAP_PIXELS), wraplength=0)
+        else:
+            label.config(text=text, wraplength=QUESTION_WRAP_PIXELS)
 
     def on_enter_key(self, _event: object | None = None) -> None:
         if self.finished or not self.recording or self.pending_question is not None:
@@ -505,15 +564,15 @@ class PolygraphApp(tk.Tk):
             self.after(100, self.update_test_timer)
 
     def update_gap_label(self) -> None:
-        """Advisory counter: time since the latest question mark (or phase start)."""
+        """Advisory counter: time since the latest question mark."""
         label = getattr(self, "gap_label", None)
         if label is None or not label.winfo_exists() or self.phase_started_at is None:
             return
-        reference = self.phase_started_at
         latest = self.pending_question or (self.questions[-1] if self.questions else None)
-        if latest is not None and self.recording_started_at is not None:
-            reference = self.recording_started_at + latest.pc_time_s
-        since = max(0.0, time.monotonic() - reference)
+        if latest is None or self.recording_started_at is None:
+            label.config(text="")  # The rest period already covered the first question.
+            return
+        since = max(0.0, time.monotonic() - (self.recording_started_at + latest.pc_time_s))
         if since >= MIN_QUESTION_GAP_SECONDS:
             label.config(text=f"Since last question: {since:.1f} s — ready", style="QGapReady.TLabel")
         else:
@@ -537,7 +596,7 @@ class PolygraphApp(tk.Tk):
         self.pending_question = Question(number=number, time_s=question_time, pc_time_s=pc_time)
         self.set_answer_mode(True)
         self.status_label.config(
-            text=f"Question {number} marked at {question_time:.3f} s — press 1 = Yes, 2 = No, 3 = Undefined"
+            text=f"Question {number} marked at {question_time:.3f} s — press {ANSWER_HINT}"
         )
 
     def save_answer(self) -> None:
@@ -551,8 +610,11 @@ class PolygraphApp(tk.Tk):
         self.questions.append(question)
         self.pending_question = None  # Cleared first, so a repeated key cannot save twice.
         self.last_answer_saved_at = time.monotonic()
+        if len(self.questions) >= len(QUESTION_TEXTS):
+            self.finish_measurement()
+            return
         next_number = len(self.questions) + 1
-        self.question_label.config(text=f"Question {next_number}")
+        self.show_question_text(self.question_label, next_number)
         self.status_label.config(
             text=(
                 f"Saved: Question {question.number} = {answer}. "
@@ -569,7 +631,7 @@ class PolygraphApp(tk.Tk):
             self.q_flash_after = None
         bg, text = {
             "waiting": (self.q_neutral_bg, "READY – mark next question"),
-            "awaiting": ("#ffd54f", "ANSWER?  1 Yes · 2 No · 3 Undefined"),
+            "awaiting": ("#ffd54f", "ANSWER?  " + ANSWER_HINT.replace(" = ", " ").replace(", ", " · ")),
             "saved": ("#81c784", "SAVED"),
         }[state]
         self.q_bg = bg
@@ -619,11 +681,11 @@ class PolygraphApp(tk.Tk):
             self.pending_question = question  # Keeps its original mark time.
             self.last_undo_at = now
             self.set_answer_mode(True)
-            self.question_label.config(text=f"Question {question.number}")
+            self.show_question_text(self.question_label, question.number)
             self.status_label.config(
                 text=(
                     f"Question {question.number} reopened (marked at {question.time_s:.3f} s)"
-                    " — press 1 = Yes, 2 = No, 3 = Undefined"
+                    f" — press {ANSWER_HINT}"
                 )
             )
         else:
@@ -772,14 +834,7 @@ class PolygraphApp(tk.Tk):
         self.recording = False
         if not self.questions:
             if messagebox.askyesno("No questions", "No questions were saved. Save the voltage recording anyway?"):
-                self.finished = True
-                saved_message = self.save_files(partial=False)
-                messagebox.showinfo("Saved", saved_message)
-                saved_paths = self.last_saved_paths
-                self.close_serial()
-                self.destroy()
-                if saved_paths is not None:
-                    plot_examination(*saved_paths, subject_name=self.subject_name)
+                self.finish_truth()
             return
 
         self.show_truth_screen()
@@ -787,7 +842,8 @@ class PolygraphApp(tk.Tk):
     def show_truth_screen(self) -> None:
         self.clear_screen()
         self.truth_index = 0
-        self.last_answer_saved_at = time.monotonic()  # Swallow a held key from the previous screen.
+        # Swallow a held key: 1 and 2 also answered the question that led here.
+        self.last_answer_saved_at = time.monotonic() + SCREEN_CHANGE_LOCKOUT_SECONDS
         # Bottom block is packed first so Tk reserves its space before the content.
         self.truth_bottom_frame = ttk.Frame(self.container)
         self.truth_bottom_frame.pack(side="bottom", fill="x")
@@ -801,7 +857,7 @@ class PolygraphApp(tk.Tk):
         self.truth_flash_label.pack(fill="x", padx=40, pady=(0, 6))
         self.truth_progress_label = ttk.Label(self.container, text="")
         self.truth_progress_label.pack()
-        self.truth_question_label = ttk.Label(self.container, text="", style="Question.TLabel")
+        self.truth_question_label = ttk.Label(self.container, text="", style="Question.TLabel", justify="center")
         self.truth_question_label.pack(pady=6)
         self.truth_answer_label = ttk.Label(self.container, text="", font=("Segoe UI", 14), wraplength=640)
         self.truth_answer_label.pack(pady=4)
@@ -816,14 +872,6 @@ class PolygraphApp(tk.Tk):
             self.truth_choices_frame, text="Lie (2)", variable=self.truth_var, value="Lie",
             command=lambda: self.classify_truth("Lie"),
         ).pack(side="left", padx=24)
-        self.truth_final_label = ttk.Label(
-            self.truth_bottom_frame,
-            text="All questions classified. Press Enter to save, Backspace to go back",
-            font=("Segoe UI", 12),
-            wraplength=640,
-            justify="center",
-        )
-        self.truth_save_button = ttk.Button(self.truth_bottom_frame, text="Save examination", command=self.finish_truth)
         self.truth_back_button = ttk.Button(self.truth_bottom_frame, text="Back", command=self.truth_back)
         self.truth_back_button.pack(pady=(4, 4))
         ttk.Label(
@@ -839,31 +887,16 @@ class PolygraphApp(tk.Tk):
                 "<Key-2>": lambda _e: self.classify_truth("Lie"),
                 "<KP_2>": lambda _e: self.classify_truth("Lie"),
                 "<BackSpace>": self.truth_back,
-                "<Return>": self.on_truth_enter,
-                "<KP_Enter>": self.on_truth_enter,
             }
         )
         self.render_truth_question()
 
     def render_truth_question(self) -> None:
-        total = len(self.questions)
-        if self.truth_index >= total:
-            # Final step: everything classified, wait for explicit save.
-            self.truth_progress_label.config(text=f"{total} of {total} classified")
-            self.truth_question_label.config(text="Done")
-            self.truth_answer_label.config(text="")
-            self.truth_choices_frame.pack_forget()
-            self.truth_final_label.pack(pady=(4, 4), before=self.truth_back_button)
-            self.truth_save_button.pack(pady=4, before=self.truth_back_button)
-        else:
-            question = self.questions[self.truth_index]
-            self.truth_final_label.pack_forget()
-            self.truth_save_button.pack_forget()
-            self.truth_choices_frame.pack(pady=10, after=self.truth_answer_label)
-            self.truth_progress_label.config(text=f"Question {self.truth_index + 1} of {total}")
-            self.truth_question_label.config(text=f"Question {question.number}")
-            self.truth_answer_label.config(text=f"Subject's answer: {question.answer}")
-            self.truth_var.set(question.truth)  # Shows the existing classification when going back.
+        question = self.questions[self.truth_index]
+        self.truth_progress_label.config(text=f"Question {self.truth_index + 1} of {len(self.questions)}")
+        self.show_question_text(self.truth_question_label, question.number)
+        self.truth_answer_label.config(text=f"Subject's answer: {question.answer}")
+        self.truth_var.set(question.truth)  # Shows the existing classification when going back.
         self.truth_back_button.state(["!disabled"] if self.truth_index > 0 else ["disabled"])
 
     def truth_debounced(self) -> bool:
@@ -882,6 +915,9 @@ class PolygraphApp(tk.Tk):
             return
         self.questions[self.truth_index].truth = truth
         self.truth_index += 1
+        if self.truth_index >= len(self.questions):
+            self.finish_truth()
+            return
         self.render_truth_question()
         self.flash_truth(truth)
 
@@ -921,23 +957,146 @@ class PolygraphApp(tk.Tk):
         self.truth_index -= 1
         self.render_truth_question()
 
-    def on_truth_enter(self, _event: object | None = None) -> None:
-        # Only the final step uses Enter; elsewhere it is a harmless no-op.
-        if not self.finished and self.truth_index >= len(self.questions) and not self.truth_debounced():
-            self.finish_truth()
-
     def finish_truth(self) -> None:
         if self.finished:
             return
         self.finished = True
         self.unbind_keys()
-        saved_message = self.save_files(partial=False)
-        messagebox.showinfo("Examination saved", saved_message)
-        saved_paths = self.last_saved_paths
+        self.save_files(partial=False)
         self.close_serial()
-        self.destroy()
-        if saved_paths is not None:
-            plot_examination(*saved_paths, subject_name=self.subject_name)
+        self.show_results_screen()
+
+    def show_results_screen(self) -> None:
+        """Final screen, in one maximized window: the summary table to the left of the graph."""
+        self.clear_screen()
+        self.minsize(1100, 600)
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            pass  # "zoomed" does not exist on every platform.
+        results = ttk.Frame(self.container)
+        results.pack(fill="both", expand=True)
+        results.rowconfigure(0, weight=1)
+        results.columnconfigure(0, weight=2, minsize=560, uniform="results")
+        results.columnconfigure(1, weight=3, uniform="results")
+        table_pane = ttk.Frame(results)
+        table_pane.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        graph_pane = ttk.Frame(results)
+        graph_pane.grid(row=0, column=1, sticky="nsew")
+        self.build_summary_table(table_pane)
+        self.after(10, self.build_graph, graph_pane)  # Later, so the table appears without waiting.
+
+    def build_graph(self, parent: ttk.Frame) -> None:
+        try:
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
+            figure = plot_examination(*self.last_saved_paths, subject_name=self.subject_name)
+            canvas = FigureCanvasTkAgg(figure, master=parent)
+        except Exception as error:  # The table and saved files must survive a graph failure.
+            ttk.Label(
+                parent, text=f"The graph could not be drawn:\n{error}", foreground="#a40000", wraplength=500
+            ).pack(expand=True)
+            return
+        toolbar = NavigationToolbar2Tk(canvas, parent, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(side="bottom", fill="x")
+        parent.pack_propagate(False)  # The pane sets the graph's size, not the figure's 13x8 inches.
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        canvas.draw()
+
+    def build_summary_table(self, parent: ttk.Frame) -> None:
+        # Bottom items are packed first so they can never be clipped.
+        ttk.Button(parent, text="Close (Esc)", command=self.on_close).pack(side="bottom", pady=(8, 4))
+        ttk.Label(
+            parent,
+            text=f"Files saved in: {OUTPUT_FOLDER}\n{self.recording_stats()}",
+            foreground="#6a6a6a",
+            wraplength=540,
+            justify="center",
+        ).pack(side="bottom", pady=(4, 0))
+        # PLACEHOLDER: remove this note once the prediction columns are real.
+        ttk.Label(parent, text="Prediction and certainty are random placeholders.", foreground="#6a6a6a").pack(
+            side="bottom"
+        )
+        ttk.Label(parent, text="Examination summary", style="Title.TLabel").pack(pady=(4, 8))
+
+        table_frame = ttk.Frame(parent)
+        table_frame.pack(fill="both", expand=True)
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(1, weight=1)
+        # A grid of labels, not a ttk.Treeview: Treeview rows share one height, so text can't wrap.
+        cell_padx, cell_pady = 6, 5
+        columns = (  # (heading, fixed width or 0 to take the remaining space, anchor)
+            ("#", 40, "center"),
+            ("Question", 0, "w"),
+            ("Answer", 90, "center"),
+            ("Prediction", 110, "center"),
+            ("Certainty", 90, "center"),
+        )
+        fixed_width = sum(width for _heading, width, _anchor in columns)
+
+        header = tk.Frame(table_frame, bg="#e0e0e0")
+        header.grid(row=0, column=0, sticky="ew")
+        canvas = tk.Canvas(table_frame, bg="white", highlightthickness=0)
+        canvas.grid(row=1, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        rows_frame = tk.Frame(canvas, bg="white")
+        rows_window = canvas.create_window(0, 0, anchor="nw", window=rows_frame)
+
+        for frame in (header, rows_frame):
+            for index, (_heading, width, _anchor) in enumerate(columns):
+                frame.columnconfigure(index, minsize=width, weight=0 if width else 1)
+        for index, (heading, _width, anchor) in enumerate(columns):
+            tk.Label(
+                header, text=heading, font=("Segoe UI", 11, "bold"), bg="#e0e0e0", anchor=anchor,
+                padx=cell_padx, pady=cell_pady,
+            ).grid(row=0, column=index, sticky="nsew")
+
+        body_font = tkfont.Font(family="Segoe UI", size=12)
+        question_labels: list[tuple[tk.Label, str]] = []
+        for row, question in enumerate(self.questions):
+            text = QUESTION_TEXTS[question.number - 1]
+            # PLACEHOLDER: replace with the classifier's output once it exists.
+            prediction = random.choice(("Truth", "Lie"))
+            certainty = random.randint(50, 99)
+            values = (question.number, text, question.answer, prediction, f"{certainty}%")
+            background = "white" if row % 2 == 0 else "#f3f3f3"
+            for index, (value, (_heading, _width, anchor)) in enumerate(zip(values, columns)):
+                label = tk.Label(
+                    rows_frame, text=str(value), font=body_font, bg=background, anchor=anchor,
+                    justify="left", padx=cell_padx, pady=cell_pady,
+                )
+                label.grid(row=row, column=index, sticky="nsew")
+                if index == 1:
+                    question_labels.append((label, text))
+                    if is_rtl(text):
+                        label.config(anchor="e", justify="right")
+
+        def on_canvas_resize(event: tk.Event) -> None:
+            canvas.itemconfigure(rows_window, width=event.width)
+            wrap_width = max(100, event.width - fixed_width - 2 * cell_padx)
+            for label, text in question_labels:
+                if is_rtl(text):
+                    label.config(text=wrap_rtl(text, body_font, wrap_width))
+                else:
+                    label.config(wraplength=wrap_width)
+
+        def on_mouse_wheel(event: tk.Event) -> None:
+            over_table = str(event.widget).startswith(str(canvas))  # Not when pointing at the graph.
+            if over_table and rows_frame.winfo_height() > canvas.winfo_height():
+                canvas.yview_scroll(-event.delta // 120, "units")
+
+        canvas.bind("<Configure>", on_canvas_resize)
+        rows_frame.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        self.bind_keys({"<MouseWheel>": on_mouse_wheel})
+
+    def recording_stats(self) -> str:
+        return (
+            f"Valid samples: {len(self.samples):,}; heart-rate readings: {len(self.bpm_readings):,}; "
+            f"malformed serial lines ignored: {self.bad_line_count}"
+        )
 
     def save_files(self, partial: bool) -> str:
         voltage_path, questions_path, bpm_path = self.last_saved_paths = save_examination(
@@ -948,8 +1107,7 @@ class PolygraphApp(tk.Tk):
         return (
             f"{kind} in:\n{OUTPUT_FOLDER}\n\n"
             f"{voltage_path.name}\n{questions_path.name}\n{bpm_path.name}\n\n"
-            f"Valid samples: {len(self.samples):,}; heart-rate readings: {len(self.bpm_readings):,}; "
-            f"malformed serial lines ignored: {self.bad_line_count}"
+            f"{self.recording_stats()}"
         )
 
     def close_serial(self) -> None:
