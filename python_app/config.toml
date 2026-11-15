@@ -38,8 +38,16 @@ gsr_reading_stale_seconds = 0.5
 # Heart rate shows "no data" if no reading arrived for this long.
 bpm_stale_seconds = 3.0
 
-# The recording is stopped as failed if no valid data arrived for this long.
+# When the heart rate loses its lock, the screen keeps showing the last locked BPM in grey
+# for up to this long, so a brief hand movement doesn't blank it. The saved data are unchanged.
+bpm_display_hold_seconds = 5.0
+
+# The connection counts as lost if no valid data arrived for this long. During an
+# examination this pauses it until the Arduino is reconnected.
 serial_timeout_seconds = 2.0
+
+# While the Arduino is not connected, the app looks for it again this often.
+reconnect_interval_seconds = 2.0
 
 # Warn that a finger may be off after the GSR reads 0 V for this long.
 zero_warning_after_seconds = 0.10

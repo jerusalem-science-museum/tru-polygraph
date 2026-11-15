@@ -24,6 +24,8 @@ Folder: `python_app/measurements/` (`OUTPUT_FOLDER`). The folder is gitignored e
 - A normal finish (the last question is answered, the timer runs out, or **Finish examination**, followed by Truth/Lie classification) writes the files without a suffix as soon as the last answer is classified. If no question was saved, the app asks whether to save the recording anyway. If the operator agrees, the questions file has only its header row.
 - After a normal finish the app also shows the examination graph beside the summary table and saves the graph as `<subject>_<YYYY-MM-DD>_<HH-MM-SS>_plot.png` in the same folder (`plotting.py`, 150 dpi). Partial saves are not plotted, so they have no PNG.
 
+  The graph draws one dashed line per question, on both panels, at its **answer mark** (`answer_time_s`). The line is labelled `Question <n> — <answer_type>`, in green for Truth, red for Lie and grey otherwise. Question marks are not drawn. Older questions files without `answer_time_s` (or with `0`) are drawn at `question_time_s` instead. In the heart-rate panel, each [sensor outage](#bpmcsv--heart-rate) is shaded grey and labelled "sensor disconnected" in the legend.
+
 All three files are written with `csv.writer`, encoded as UTF-8 **with BOM** (`utf-8-sig`) so Excel shows Hebrew names correctly, with a header row and comma separators. Floating-point times and voltages have 6 decimals.
 
 ## The three time columns
@@ -32,8 +34,8 @@ Every file has an Arduino-based time and a PC time. Both are in seconds since th
 
 | Column | Clock | How it is computed | Use it for |
 |---|---|---|---|
-| `time_s` (`question_time_s` in the questions file) | **Arduino** `micros()`, anchored to the PC at the first sample | `(unwrapped_us − anchor_us) / 1e6 + anchor_offset_s`. `anchor_us` is the unwrapped `micros()` of the first GSR sample processed after Start, and `anchor_offset_s` is that sample's PC arrival time (its `pc_time_s`). | **All analysis and alignment.** Sample spacing is the true 2 ms acquisition spacing, unaffected by USB buffering. |
-| `pc_time_s` | PC `time.monotonic()` | arrival time of the line (or key-press time for questions) − time Start was pressed | Reference and debugging only |
+| `time_s` (`question_time_s` and `answer_time_s` in the questions file) | **Arduino** `micros()`, anchored to the PC at the first sample | `(unwrapped_us − anchor_us) / 1e6 + anchor_offset_s`. `anchor_us` is the unwrapped `micros()` of the first GSR sample processed after Start, and `anchor_offset_s` is that sample's PC arrival time (its `pc_time_s`). | **All analysis and alignment.** Sample spacing is the true 2 ms acquisition spacing, unaffected by USB buffering. |
+| `pc_time_s` (`pc_time_s` and `answer_pc_time_s` in the questions file) | PC `time.monotonic()` | arrival time of the line (or key-press time for questions) − time Start was pressed | Reference and debugging only |
 | `arduino_time_us` | raw Arduino `micros()` | the 32-bit `t_us` exactly as sent, **not unwrapped** | Re-deriving timing, measuring the real sample rate, checking for gaps |
 
 How they relate:
@@ -69,15 +71,24 @@ Edge cases:
 
 One row per saved question (`Question` dataclass), in the order they were saved.
 
+Each question has two moments:
+
+- **Question mark**: the operator finished asking the question and pressed Space/Enter (or clicked).
+- **Answer mark**: the operator recorded the subject's answer by pressing an answer key (1/2/3). The subject answers between the two marks, so the answer mark is the latest moment the answer can have been given.
+
 | Column | Meaning | Units / values | How it is computed |
 |---|---|---|---|
-| `question_time_s` | When the operator pressed Space/Enter (or clicked) to mark the visitor's answer | s, Arduino-based scale | `current_times()[0]` at the mark |
-| `pc_time_s` | Same moment on the PC clock | s | `current_times()[1]` |
+| `question_time_s` | Question mark: the operator finished asking (Space/Enter or click) | s, Arduino-based scale | `current_times()[0]` at the question mark |
+| `pc_time_s` | Question mark on the PC clock | s | `current_times()[1]` at the question mark |
 | `question_number` | Sequential number | 1, 2, 3, … | `len(questions) + 1` at the mark. A question reopened with Backspace keeps its number and its original mark time. |
 | `subject_answer` | What the visitor answered | `Yes`, `No`, `Undefined` (`ANSWER_CHOICES`, keys 1/2/3) | set when the answer key is pressed |
 | `answer_type` | Operator's classification after the examination | `Truth`, `Lie`, or empty | set on the classification screen (keys 1/2). It is empty in `_PARTIAL` files. Despite the name, it is the ground truth (truth or lie), not the kind of answer. |
+| `answer_time_s` | Answer mark: the operator pressed the answer key | s, Arduino-based scale | `current_times()[0]` at the answer mark |
+| `answer_pc_time_s` | Answer mark on the PC clock | s | `current_times()[1]` at the answer mark |
 
-`question_time_s` (the Space/Enter press) is the moment the visitor answered. Use it as the stimulus time when aligning GSR responses (typically 1–3 s later). The time the operator pressed the answer key is not recorded.
+`answer_time_s` and `answer_pc_time_s` are the last two columns so that readers of the older five-column layout keep working. Files saved before they were added don't have them; `plotting.py` then uses `question_time_s` for the marker. A `0` in these columns also means "not recorded".
+
+GSR responses typically start 1–3 s after the stimulus. The graph marks each question at its answer mark.
 
 ## `*_bpm.csv` — heart rate
 
@@ -92,3 +103,5 @@ One row per `B` line received while recording, about 1 per second (`BpmReading` 
 | `state` | Detector state | `NO_FINGER`, `SETTLING`, `ACQUIRING`, `LOCKED`, `NO_SENSOR` | copied, see the state table in [serial-protocol.md](serial-protocol.md) |
 
 In the graph (`plotting.py`), `bpm = 0` is drawn as a gap, values are drawn as steps (`drawstyle="steps-post"`), and "No heart-rate data" is shown if there is no non-zero value.
+
+A **sensor outage** is a run of consecutive rows with `state = NO_SENSOR`. The graph shades it from the first `NO_SENSOR` row to the next row in another state (or to the last row), labelled "sensor disconnected". Other not-locked states (`NO_FINGER`, `SETTLING`, `ACQUIRING`) are plain gaps, not shaded. A connection loss to the Arduino is not shaded: it simply has no rows.

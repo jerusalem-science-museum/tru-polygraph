@@ -37,6 +37,7 @@ from plotting import plot_examination  # noqa: E402
 from config import (  # noqa: E402
     ADC_REFERENCE_VOLTS,
     ANSWER_CHOICES,
+    BPM_DISPLAY_HOLD_SECONDS,
     BPM_STALE_SECONDS,
     DEFAULT_REST_SECONDS,
     DEFAULT_TEST_SECONDS,
@@ -48,6 +49,7 @@ from config import (  # noqa: E402
     MIN_QUESTION_GAP_SECONDS,
     OUTPUT_FOLDER,
     QUESTION_TEXTS,
+    RECONNECT_INTERVAL_SECONDS,
     SCREEN_CHANGE_LOCKOUT_SECONDS,
     SERIAL_TIMEOUT_SECONDS,
     TRUTH_FLASH_COLOR,
@@ -63,6 +65,32 @@ except ImportError:
 ANSWER_HINT = ", ".join(f"{number} = {choice}" for number, choice in enumerate(ANSWER_CHOICES, start=1))
 QUESTION_WRAP_PIXELS = 640
 RLE, PDF = chr(0x202B), chr(0x202C)  # Unicode marks: start and end of right-to-left text.
+HELD_BPM_COLOR = "#8a8a8a"
+
+
+def heart_rate_display(
+    latest: tuple[int, str, float] | None,
+    last_locked: tuple[int, float] | None,
+    now: float,
+    stale_seconds: float = BPM_STALE_SECONDS,
+    hold_seconds: float = BPM_DISPLAY_HOLD_SECONDS,
+) -> tuple[str, bool]:
+    """Return (text, held) for the heart-rate label.
+
+    latest is (bpm, state, received_at) of the newest reading, last_locked is (bpm, received_at)
+    of the newest LOCKED one. After the lock is lost the last locked BPM stays on screen, marked
+    as held, for hold_seconds, so a brief movement doesn't blank it. Stale data and NO_SENSOR
+    are faults the operator must see at once, so they are never held. Screen only: the
+    recorded readings are always what the firmware sent.
+    """
+    if latest is None or now - latest[2] > stale_seconds:
+        return "Heart rate: no data", False
+    bpm, state, _received_at = latest
+    if state == "LOCKED" and bpm > 0:
+        return f"Heart rate: {bpm} BPM", False
+    if state != "NO_SENSOR" and last_locked is not None and now - last_locked[1] <= hold_seconds:
+        return f"Heart rate: {last_locked[0]} BPM (holding)", True
+    return f"Heart rate: -- ({state})", False
 
 
 def log_i2c_boot(text: str) -> None:
@@ -115,15 +143,28 @@ class PolygraphApp(tk.Tk):
         self.minsize(700, 480)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         # Bound directly (not via bind_keys) so clear_screen() never removes it.
-        self.bind("<Escape>", lambda _event: self.on_close())
-        self.bind("<Control-q>", lambda _event: self.on_close())
-        self.bind("<Control-Q>", lambda _event: self.on_close())
+        for sequence in ("<Escape>", "<Control-q>", "<Control-Q>"):
+            self.bind(sequence, self.unless_paused(lambda _event: self.on_close()))
 
         self.connection: serial.Serial | None = None
         self.port_name = ""
         self.reader_thread: threading.Thread | None = None
-        self.stop_reader = threading.Event()
+        self.stop_reader = threading.Event()  # Replaced for each reader (see start_reader).
         self.serial_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.connect_thread: threading.Thread | None = None
+        self.retry_after: str | None = None  # Scheduled automatic connection attempt.
+        self.error_details_label: ttk.Label | None = None  # Connection error screen only.
+        self.retry_note_label: ttk.Label | None = None
+
+        # Connection loss during an examination: everything on the operator side pauses
+        # (countdowns, keys, question gap) while the data keep real time. operator_clock()
+        # is PC time minus the paused time and drives the countdowns and the question gap.
+        self.connection_lost = False
+        self.loss_window: tk.Toplevel | None = None
+        self.loss_details_label: ttk.Label | None = None
+        self.paused_at: float | None = None
+        self.paused_total_s = 0.0
+        self.answer_clock_at: dict[int, float] = {}  # Question number -> operator_clock() of its answer.
 
         self.subject_name = ""
         self.file_stem = ""
@@ -153,6 +194,7 @@ class PolygraphApp(tk.Tk):
         self.last_sample_received_at = 0.0
         self.bpm_readings: list[BpmReading] = []
         self.latest_bpm: tuple[int, str, float] | None = None  # (bpm, state, received_at)
+        self.last_locked_bpm: tuple[int, float] | None = None  # (bpm, received_at), for the display hold.
         self.heart_label: ttk.Label | None = None
         self.last_gsr_raw: int | None = None
         self.last_gsr_in_range_at: float | None = None  # Last sample with 0 < raw < GSR_SHORT_MIN.
@@ -194,12 +236,20 @@ class PolygraphApp(tk.Tk):
 
         self.after(50, self.process_serial_events)
         self.show_connecting_screen()
-        threading.Thread(target=self.connect_worker, daemon=True).start()
+        self.start_connect()
+
+    def unless_paused(self, handler):
+        """Wrap a key handler so it does nothing while a connection loss pauses the examination."""
+        def wrapped(event: tk.Event):
+            if self.connection_lost:
+                return "break"
+            return handler(event)
+        return wrapped
 
     def bind_keys(self, handlers: dict[str, object]) -> None:
         """Bind keys on the toplevel window (works whatever widget has focus)."""
         for sequence, handler in handlers.items():
-            self.key_bindings.append((sequence, self.bind(sequence, handler)))
+            self.key_bindings.append((sequence, self.bind(sequence, self.unless_paused(handler))))
 
     def unbind_keys(self) -> None:
         for sequence, funcid in self.key_bindings:
@@ -227,6 +277,34 @@ class PolygraphApp(tk.Tk):
         progress = self.container.winfo_children()[-1]
         progress.start(12)
 
+    def connection_needed(self) -> bool:
+        """True while the app should look for the Arduino: before an examination, or after a
+        connection loss during one. The truth and results screens no longer need it."""
+        return (
+            self.connection is None
+            and not self.finished
+            and (self.connection_lost or self.recording_started_at is None)
+        )
+
+    def start_connect(self) -> None:
+        """Run one detect_arduino() attempt in the background; never two at once."""
+        self.cancel_retry()
+        if not self.connection_needed():
+            return
+        if self.connect_thread is not None and self.connect_thread.is_alive():
+            return  # Its result arrives as a connected/connect_error event.
+        self.connect_thread = threading.Thread(target=self.connect_worker, daemon=True)
+        self.connect_thread.start()
+
+    def schedule_retry(self) -> None:
+        self.cancel_retry()
+        self.retry_after = self.after(int(RECONNECT_INTERVAL_SECONDS * 1000), self.start_connect)
+
+    def cancel_retry(self) -> None:
+        if self.retry_after is not None:
+            self.after_cancel(self.retry_after)
+            self.retry_after = None
+
     def connect_worker(self) -> None:
         try:
             connection, port = detect_arduino()
@@ -239,12 +317,25 @@ class PolygraphApp(tk.Tk):
             while True:
                 event, payload = self.serial_events.get_nowait()
                 if event == "connected":
-                    self.connection, self.port_name = payload  # type: ignore[misc]
+                    connection, port = payload  # type: ignore[misc]
+                    if not self.connection_needed():
+                        connection.close()  # The examination ended while this attempt ran.
+                        continue
+                    self.connection, self.port_name = connection, port
                     self.last_valid_sample_at = time.monotonic()
                     self.start_reader()
-                    self.show_setup_screen()
+                    if self.connection_lost:
+                        self.resume_after_reconnect()
+                    else:
+                        self.show_setup_screen()
                 elif event == "connect_error":
-                    self.show_connection_error(str(payload))
+                    if not self.connection_needed():
+                        continue
+                    if self.connection_lost:
+                        self.update_loss_details(str(payload))
+                    else:
+                        self.show_connection_error(str(payload))
+                    self.schedule_retry()
                 elif event == "sample":
                     arduino_us, raw_adc, received_at = payload  # type: ignore[misc]
                     self.handle_sample(arduino_us, raw_adc, received_at)
@@ -260,7 +351,11 @@ class PolygraphApp(tk.Tk):
 
         self.update_heart_label()
         self.update_sensor_status()
-        if self.recording and self.last_valid_sample_at is not None:
+        # Watch for silence while connected: during an examination, and on the setup screen.
+        watching = self.connection is not None and not self.connection_lost and (
+            self.recording or (self.recording_started_at is None and not self.finished)
+        )
+        if watching and self.last_valid_sample_at is not None:
             silence = time.monotonic() - self.last_valid_sample_at
             if silence > SERIAL_TIMEOUT_SECONDS:
                 self.handle_serial_error(
@@ -270,16 +365,20 @@ class PolygraphApp(tk.Tk):
         self.after(50, self.process_serial_events)
 
     def start_reader(self) -> None:
-        self.stop_reader.clear()
-        self.reader_thread = threading.Thread(target=self.serial_reader, daemon=True)
+        # A fresh event per reader: an old reader that outlived close_serial()'s join must
+        # stay stopped (and silent) after a reconnect starts a new one.
+        self.stop_reader = threading.Event()
+        self.reader_thread = threading.Thread(
+            target=self.serial_reader, args=(self.stop_reader,), daemon=True
+        )
         self.reader_thread.start()
 
-    def serial_reader(self) -> None:
+    def serial_reader(self, stop: threading.Event) -> None:
         # Keep a local reference: close_serial() sets self.connection to None.
         connection = self.connection
         assert connection is not None
-        i2c_logged = False
-        while not self.stop_reader.is_set():
+        i2c_logged = False  # Once per connection, so a reconnect logs the new boot too.
+        while not stop.is_set():
             try:
                 data = connection.readline()
                 if not data:
@@ -302,26 +401,37 @@ class PolygraphApp(tk.Tk):
             except (OSError, SerialException, TypeError, AttributeError) as exc:
                 # pyserial on Windows raises TypeError/AttributeError if the port
                 # is closed while readline() is blocked; that is a normal shutdown.
-                if not self.stop_reader.is_set():
+                if not stop.is_set():
                     self.serial_events.put(("serial_error", str(exc)))
                 return
 
     def show_connection_error(self, details: str) -> None:
+        """Show (or refresh) the error screen; the app keeps retrying on its own."""
+        note = f"Retrying automatically... (last attempt {datetime.now():%H:%M:%S})"
+        label = self.error_details_label
+        if label is not None and label.winfo_exists():
+            label.config(text=details)  # Refresh in place, so retries don't flicker the screen.
+            if self.retry_note_label is not None:
+                self.retry_note_label.config(text=note)
+            return
         self.clear_screen()
-        ttk.Button(self.container, text="Try again", command=self.retry_connection).pack(side="bottom", pady=10)
+        ttk.Button(self.container, text="Try again now", command=self.retry_connection).pack(side="bottom", pady=10)
         ttk.Label(self.container, text="Arduino connection error", style="Title.TLabel").pack(pady=(30, 10))
-        ttk.Label(
+        self.retry_note_label = ttk.Label(self.container, text=note, foreground="#6a6a6a")
+        self.retry_note_label.pack(pady=(0, 4))
+        self.error_details_label = ttk.Label(
             self.container,
             text=details,
             foreground="#a40000",
             wraplength=640,
             justify="center",
-        ).pack(pady=8)
+        )
+        self.error_details_label.pack(pady=8)
 
     def retry_connection(self) -> None:
-        self.close_serial()
-        self.show_connecting_screen()
-        threading.Thread(target=self.connect_worker, daemon=True).start()
+        if self.retry_note_label is not None and self.retry_note_label.winfo_exists():
+            self.retry_note_label.config(text="Retrying now...")
+        self.start_connect()
 
     def show_setup_screen(self) -> None:
         self.clear_screen()
@@ -347,6 +457,9 @@ class PolygraphApp(tk.Tk):
                 label.grid(row=row, column=column, sticky="w", padx=12, pady=2)
                 self.sensor_status_labels[f"{key}_{field}"] = label
         self.update_sensor_status()
+        ttk.Label(
+            self.container, text="Keep the hand with the heart-rate sensor still.", foreground="#6a6a6a"
+        ).pack(pady=(0, 6))
 
         form = ttk.Frame(self.container)
         form.pack()
@@ -405,9 +518,13 @@ class PolygraphApp(tk.Tk):
         self.pending_question = None
         self.bad_line_count = 0
         self.bpm_readings.clear()
+        self.answer_clock_at.clear()
         self.anchor_us = None  # Re-anchored on the first sample of this recording.
+        self.last_sample_time_s = 0.0
+        self.paused_at = None
+        self.paused_total_s = 0.0
         self.recording_started_at = time.monotonic()
-        self.phase_started_at = self.recording_started_at
+        self.phase_started_at = self.operator_clock()
         self.last_valid_sample_at = self.recording_started_at
         self.recording = True
         self.show_rest_screen()
@@ -428,7 +545,8 @@ class PolygraphApp(tk.Tk):
     def update_rest_timer(self) -> None:
         if not self.recording or self.finished or self.phase_started_at is None:
             return
-        remaining = max(0, self.rest_seconds - (time.monotonic() - self.phase_started_at))
+        # operator_clock() stands still during a connection loss, so the countdown freezes.
+        remaining = max(0, self.rest_seconds - (self.operator_clock() - self.phase_started_at))
         self.timer_label.config(text=f"{remaining:04.1f}")
         if remaining <= 0:
             self.show_question_screen()
@@ -437,7 +555,7 @@ class PolygraphApp(tk.Tk):
 
     def show_question_screen(self) -> None:
         self.clear_screen()
-        self.phase_started_at = time.monotonic()
+        self.phase_started_at = self.operator_clock()
 
         self.q_screen_active = True
         self.container.configure(style="Q.TFrame")
@@ -494,7 +612,8 @@ class PolygraphApp(tk.Tk):
         ttk.Label(
             self.container,
             text="Press Space or Enter (or click) when the question is asked. "
-            f"Then press {ANSWER_HINT}. Backspace = undo.",
+            f"Then press {ANSWER_HINT} when the subject answers. Backspace = undo. "
+            "Wait for \"Since last answer\" to say ready before the next question.",
             style="Q.TLabel",
             wraplength=640,
             justify="center",
@@ -531,7 +650,7 @@ class PolygraphApp(tk.Tk):
             label.config(text=text, wraplength=QUESTION_WRAP_PIXELS)
 
     def on_enter_key(self, _event: object | None = None) -> None:
-        if self.finished or not self.recording or self.pending_question is not None:
+        if self.finished or not self.recording or self.connection_lost or self.pending_question is not None:
             return
         if time.monotonic() - self.last_answer_saved_at < MARK_DEBOUNCE_SECONDS:
             return  # Key repeat right after an answer must not mark the next question.
@@ -542,10 +661,11 @@ class PolygraphApp(tk.Tk):
         if self.finished or not self.recording:
             return
         if messagebox.askyesno("Finish examination", "Finish the examination now?", default=messagebox.NO):
-            self.finish_measurement()
+            if not self.connection_lost:  # The connection may have dropped while the dialog was open.
+                self.finish_measurement()
 
     def answer_by_key(self, choice: str) -> None:
-        if self.finished or self.pending_question is None:
+        if self.finished or self.connection_lost or self.pending_question is None:
             return
         self.answer_var.set(choice)
         self.save_answer()
@@ -553,7 +673,7 @@ class PolygraphApp(tk.Tk):
     def update_test_timer(self) -> None:
         if not self.recording or self.finished or self.phase_started_at is None:
             return
-        elapsed = time.monotonic() - self.phase_started_at
+        elapsed = self.operator_clock() - self.phase_started_at  # Frozen during a connection loss.
         remaining = max(0, self.test_seconds - elapsed)
         minutes, seconds = divmod(int(remaining), 60)
         self.test_timer_label.config(text=f"{minutes:02d}:{seconds:02d}")
@@ -564,19 +684,37 @@ class PolygraphApp(tk.Tk):
             self.after(100, self.update_test_timer)
 
     def update_gap_label(self) -> None:
-        """Advisory counter: time since the latest question mark."""
+        """Advisory counter (the question gap): time since the latest saved answer mark."""
         label = getattr(self, "gap_label", None)
         if label is None or not label.winfo_exists() or self.phase_started_at is None:
             return
-        latest = self.pending_question or (self.questions[-1] if self.questions else None)
-        if latest is None or self.recording_started_at is None:
-            label.config(text="")  # The rest period already covered the first question.
+        # Blank while an answer is pending, and before the first answer (the rest period
+        # already covered the first question).
+        answered_at = None
+        if self.pending_question is None and self.questions:
+            answered_at = self.answer_clock_at.get(self.questions[-1].number)
+        if answered_at is None:
+            label.config(text="")
             return
-        since = max(0.0, time.monotonic() - (self.recording_started_at + latest.pc_time_s))
+        # operator_clock() excludes connection-loss pauses, so the counter freezes during one.
+        since = max(0.0, self.operator_clock() - answered_at)
         if since >= MIN_QUESTION_GAP_SECONDS:
-            label.config(text=f"Since last question: {since:.1f} s — ready", style="QGapReady.TLabel")
+            label.config(text=f"Since last answer: {since:.1f} s — ready", style="QGapReady.TLabel")
         else:
-            label.config(text=f"Since last question: {since:.1f} s — wait", style="QGapWait.TLabel")
+            label.config(text=f"Since last answer: {since:.1f} s — wait", style="QGapWait.TLabel")
+
+    def operator_clock(self) -> float:
+        """PC monotonic time minus connection-loss pauses; stands still during a pause.
+
+        Drives the countdowns and the question gap only. The recorded data keep real time.
+        """
+        now = time.monotonic()
+        paused = self.paused_total_s + (now - self.paused_at if self.paused_at is not None else 0.0)
+        return now - paused
+
+    def record_answer_mark(self, question: Question) -> None:
+        question.answer_time_s, question.answer_pc_time_s = self.current_times()
+        self.answer_clock_at[question.number] = self.operator_clock()
 
     def current_times(self) -> tuple[float, float]:
         """Return (arduino_based_time_s, pc_time_s) since recording start."""
@@ -589,7 +727,7 @@ class PolygraphApp(tk.Tk):
         return pc_time, pc_time  # No sample yet: fall back to PC time.
 
     def mark_question(self) -> None:
-        if self.pending_question is not None or self.recording_started_at is None:
+        if self.pending_question is not None or self.recording_started_at is None or self.connection_lost:
             return
         number = len(self.questions) + 1
         question_time, pc_time = self.current_times()
@@ -601,12 +739,13 @@ class PolygraphApp(tk.Tk):
 
     def save_answer(self) -> None:
         question = self.pending_question
-        if question is None:
+        if question is None or self.connection_lost:
             return  # Nothing pending: a double press or stray click is ignored.
         answer = self.answer_var.get()
         if answer not in ANSWER_CHOICES:
             return
         question.answer = answer
+        self.record_answer_mark(question)
         self.questions.append(question)
         self.pending_question = None  # Cleared first, so a repeated key cannot save twice.
         self.last_answer_saved_at = time.monotonic()
@@ -664,7 +803,7 @@ class PolygraphApp(tk.Tk):
 
     def undo_last(self) -> None:
         """Cancel a pending mark, or reopen the last saved question for a new answer."""
-        if self.finished or not self.recording:
+        if self.finished or not self.recording or self.connection_lost:
             return
         now = time.monotonic()
         if now - self.last_undo_at < MARK_DEBOUNCE_SECONDS:
@@ -678,6 +817,9 @@ class PolygraphApp(tk.Tk):
         elif self.questions:
             question = self.questions.pop()
             question.answer = ""
+            # It will be answered again, so its answer mark is cleared; the question mark stays.
+            question.answer_time_s = question.answer_pc_time_s = 0.0
+            self.answer_clock_at.pop(question.number, None)
             self.pending_question = question  # Keeps its original mark time.
             self.last_undo_at = now
             self.set_answer_mode(True)
@@ -701,8 +843,11 @@ class PolygraphApp(tk.Tk):
         if self.recording and self.recording_started_at is not None:
             pc_time = received_at - self.recording_started_at
             if self.anchor_us is None:
+                # First sample of the recording, or after a reconnect (the Arduino reset
+                # restarted micros()): anchor at the real elapsed time, so an outage shows as
+                # a gap and time is never compressed. max() keeps time from going backwards.
                 self.anchor_us = unwrapped_us
-                self.anchor_offset_s = pc_time
+                self.anchor_offset_s = max(pc_time, self.last_sample_time_s)
             elapsed = (unwrapped_us - self.anchor_us) / 1e6 + self.anchor_offset_s
             self.last_sample_time_s = elapsed
             self.last_sample_received_at = received_at
@@ -721,6 +866,10 @@ class PolygraphApp(tk.Tk):
     def handle_bpm(self, arduino_us: int, bpm: int, state: str, received_at: float) -> None:
         unwrapped_us = self.unwrapper.unwrap(arduino_us)
         self.latest_bpm = (bpm, state, received_at)
+        if state == "LOCKED" and bpm > 0:
+            self.last_locked_bpm = (bpm, received_at)
+        elif state == "NO_SENSOR":
+            self.last_locked_bpm = None  # A sensor fault must not be followed by a held value.
         self.update_heart_label()
         if self.recording and self.recording_started_at is not None:
             pc_time = received_at - self.recording_started_at
@@ -730,18 +879,12 @@ class PolygraphApp(tk.Tk):
                 time_s = pc_time  # No GSR sample yet: fall back to PC time.
             self.bpm_readings.append(BpmReading(time_s, pc_time, arduino_us, bpm, state))
 
-    def heart_rate_text(self) -> str:
-        if self.latest_bpm is None or time.monotonic() - self.latest_bpm[2] > BPM_STALE_SECONDS:
-            return "Heart rate: no data"
-        bpm, state, _received_at = self.latest_bpm
-        if state == "LOCKED" and bpm > 0:
-            return f"Heart rate: {bpm} BPM"
-        return f"Heart rate: -- ({state})"
-
     def update_heart_label(self) -> None:
         label = self.heart_label
         if label is not None and label.winfo_exists():
-            label.config(text=self.heart_rate_text())
+            text, held = heart_rate_display(self.latest_bpm, self.last_locked_bpm, time.monotonic())
+            # An empty foreground falls back to the label's style colour.
+            label.config(text=text, foreground=HELD_BPM_COLOR if held else "")
 
     def sensor_status(self) -> dict[str, tuple[bool, str]]:
         """(ok, text) for each setup-screen status cell."""
@@ -804,17 +947,101 @@ class PolygraphApp(tk.Tk):
                 label.config(text="", bg=self.q_bg if self.q_screen_active else self.cget("bg"), padx=0, pady=0)
 
     def handle_serial_error(self, details: str) -> None:
-        if self.finished:
+        if self.finished or self.connection_lost:
             return
-        self.recording = False
-        self.finished = True
-        saved_message = self.save_files(partial=True)
-        messagebox.showerror(
-            "Arduino connection lost",
-            f"The serial connection failed:\n\n{details}\n\n{saved_message}",
-        )
         self.close_serial()
-        self.show_connection_error("The Arduino connection was lost. Reconnect it to start a new examination.")
+        if self.recording:
+            self.pause_for_connection_loss(details)
+        elif self.recording_started_at is None:  # Setup screen: look for the Arduino again.
+            self.show_connection_error(f"The Arduino connection was lost.\n\n{details}")
+            self.start_connect()
+        # Otherwise (truth classification) all data are in; the connection is no longer needed.
+
+    def pause_for_connection_loss(self, details: str) -> None:
+        """Pause the examination (countdowns, keys, question gap) and reconnect in the background."""
+        self.connection_lost = True
+        self.paused_at = time.monotonic()
+        self.show_loss_bubble(details)
+        self.start_connect()
+
+    def resume_after_reconnect(self) -> None:
+        """Called once the reader runs on the new connection: re-anchor time and resume."""
+        # Opening the port reset the Arduino, so micros() restarted: unwrap from scratch and
+        # let the next sample re-anchor at the real elapsed recording time (handle_sample).
+        self.unwrapper = MicrosUnwrapper()
+        self.anchor_us = None
+        self.zero_started_at = None
+        if self.paused_at is not None:
+            self.paused_total_s += time.monotonic() - self.paused_at
+            self.paused_at = None
+        self.connection_lost = False
+        self.close_loss_bubble()
+        self.focus_set()
+
+    def show_loss_bubble(self, details: str) -> None:
+        """A small window on top of the app; its grab blocks clicks on the paused screen."""
+        self.close_loss_bubble()
+        bubble = tk.Toplevel(self)
+        bubble.title("Connection lost")
+        bubble.transient(self)
+        bubble.resizable(False, False)
+        bubble.protocol("WM_DELETE_WINDOW", lambda: None)  # Wait for the cable or End examination.
+        frame = ttk.Frame(bubble, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Connection lost", style="Title.TLabel", foreground="#a40000").pack(pady=(0, 8))
+        ttk.Label(
+            frame,
+            text="Reconnect the Arduino cable. Reconnecting...\nThe examination is paused.",
+            font=("Segoe UI", 12),
+            justify="center",
+        ).pack(pady=(0, 8))
+        self.loss_details_label = ttk.Label(
+            frame, text=details, foreground="#6a6a6a", wraplength=460, justify="center"
+        )
+        self.loss_details_label.pack(pady=(0, 12))
+        ttk.Button(frame, text="End examination", command=self.end_examination_from_bubble).pack()
+        self.loss_window = bubble
+
+        # Centre over the main window.
+        bubble.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - bubble.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - bubble.winfo_reqheight()) // 3
+        bubble.geometry(f"+{max(0, x)}+{max(0, y)}")
+        try:
+            bubble.grab_set()
+        except tk.TclError:
+            pass  # Not viewable yet; the key guards still pause the examination.
+        bubble.focus_force()
+
+    def update_loss_details(self, details: str) -> None:
+        label = self.loss_details_label
+        if label is not None and label.winfo_exists():
+            label.config(text=f"{details}\n\nLast attempt {datetime.now():%H:%M:%S}")
+
+    def close_loss_bubble(self) -> None:
+        if self.loss_window is not None:
+            try:
+                self.loss_window.grab_release()
+                self.loss_window.destroy()
+            except tk.TclError:
+                pass
+        self.loss_window = None
+        self.loss_details_label = None
+
+    def end_examination_from_bubble(self) -> None:
+        """Stop reconnecting and finish as if the operator had finished early."""
+        self.close_loss_bubble()
+        # connection_lost stays set while finish_measurement may ask questions, so keys
+        # stay ignored and a reconnect in the meantime is still handled.
+        self.finish_measurement()
+        if self.recording:  # The operator cancelled finishing.
+            if self.connection_lost:
+                self.show_loss_bubble("Still reconnecting...")
+            return  # Else the Arduino came back during the dialog and the examination resumed.
+        self.connection_lost = False
+        self.paused_at = None
+        self.cancel_retry()
+        self.close_serial()  # In case a reconnect arrived during the dialog.
 
     def finish_measurement(self) -> None:
         if self.finished:
@@ -823,6 +1050,7 @@ class PolygraphApp(tk.Tk):
             answer = self.answer_var.get()
             if answer in ANSWER_CHOICES:
                 self.pending_question.answer = answer
+                self.record_answer_mark(self.pending_question)
                 self.questions.append(self.pending_question)
             elif not messagebox.askyesno(
                 "Unfinished question",
@@ -1137,6 +1365,7 @@ class PolygraphApp(tk.Tk):
             if choice:
                 self.save_files(partial=True)
         self.finished = True
+        self.cancel_retry()
         self.close_serial()
         self.destroy()
 

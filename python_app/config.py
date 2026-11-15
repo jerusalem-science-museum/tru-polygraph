@@ -32,7 +32,9 @@ _REQUIRED_TYPES = {
     "gsr_short_min": int,
     "gsr_reading_stale_seconds": _NUMBER,
     "bpm_stale_seconds": _NUMBER,
+    "bpm_display_hold_seconds": _NUMBER,
     "serial_timeout_seconds": _NUMBER,
+    "reconnect_interval_seconds": _NUMBER,
     "zero_warning_after_seconds": _NUMBER,
     "mark_debounce_seconds": _NUMBER,
     "screen_change_lockout_seconds": _NUMBER,
@@ -59,6 +61,10 @@ def _load() -> dict:
             raise ValueError(f'"{key}" must be a non-empty list of non-empty text items.')
         if maximum is not None and len(items) > maximum:
             raise ValueError(f'"{key}" can have at most {maximum} items.')
+    if settings["bpm_display_hold_seconds"] < 0:
+        raise ValueError('"bpm_display_hold_seconds" must not be negative.')
+    if settings["reconnect_interval_seconds"] <= 0:  # 0 would retry in a busy loop.
+        raise ValueError('"reconnect_interval_seconds" must be greater than 0.')
     return settings
 
 
@@ -79,7 +85,9 @@ ADC_REFERENCE_VOLTS: float = _settings["adc_reference_volts"]
 GSR_SHORT_MIN: int = _settings["gsr_short_min"]
 GSR_READING_STALE_SECONDS: float = _settings["gsr_reading_stale_seconds"]
 BPM_STALE_SECONDS: float = _settings["bpm_stale_seconds"]
+BPM_DISPLAY_HOLD_SECONDS: float = _settings["bpm_display_hold_seconds"]
 SERIAL_TIMEOUT_SECONDS: float = _settings["serial_timeout_seconds"]
+RECONNECT_INTERVAL_SECONDS: float = _settings["reconnect_interval_seconds"]
 ZERO_WARNING_AFTER_SECONDS: float = _settings["zero_warning_after_seconds"]
 MARK_DEBOUNCE_SECONDS: float = _settings["mark_debounce_seconds"]
 SCREEN_CHANGE_LOCKOUT_SECONDS: float = _settings["screen_change_lockout_seconds"]

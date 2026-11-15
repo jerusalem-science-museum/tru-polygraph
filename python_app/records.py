@@ -32,8 +32,10 @@ class BpmReading:
 @dataclass
 class Question:
     number: int
-    time_s: float  # Arduino-based time since recording start.
-    pc_time_s: float = 0.0  # PC clock time since recording start (reference only).
+    time_s: float  # Arduino-based time of the question mark since recording start.
+    pc_time_s: float = 0.0  # PC clock time of the question mark since recording start.
+    answer_time_s: float = 0.0  # Arduino-based time of the answer mark since recording start.
+    answer_pc_time_s: float = 0.0  # PC clock time of the answer mark since recording start.
     answer: str = ""
     truth: str = ""
 
@@ -93,7 +95,16 @@ def save_examination(
     with questions_path.open("w", newline="", encoding="utf-8-sig") as file:
         writer = csv.writer(file)
         writer.writerow(
-            ["question_time_s", "pc_time_s", "question_number", "subject_answer", "answer_type"]
+            [
+                "question_time_s",
+                "pc_time_s",
+                "question_number",
+                "subject_answer",
+                "answer_type",
+                # Appended last so readers of the older five-column layout keep working.
+                "answer_time_s",
+                "answer_pc_time_s",
+            ]
         )
         for question in questions:
             writer.writerow(
@@ -103,6 +114,8 @@ def save_examination(
                     question.number,
                     question.answer,
                     question.truth,
+                    f"{question.answer_time_s:.6f}",
+                    f"{question.answer_pc_time_s:.6f}",
                 ]
             )
 

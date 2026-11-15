@@ -5,6 +5,10 @@
 //   B,<t_us>,<bpm>,<state>      1 Hz heart rate (bpm 0 unless LOCKED)
 //   # <text>                    info / comments (includes the "# i2c" boot check, see README.md)
 //
+// The MAX30102 can be unplugged and plugged back in while running: no FIFO samples for
+// SENSOR_LOST_US (or an I2C timeout) marks it lost (B lines report NO_SENSOR), and a
+// missing sensor is re-probed every PROBE_INTERVAL_US, then reconfigured. GSR keeps going.
+//
 // Serial commands: t = test mode (human-readable 1 s summary per sensor, stream off)
 //                  s = stream mode (default, what the app reads)
 // Test mode is not remembered: opening the port resets the board into stream mode.
@@ -18,7 +22,8 @@
 #include "MAX30105.h"
 
 MAX30105 sensor;
-bool sensorOk = false;
+bool sensorOk = false;                     // live: sensor answering and delivering samples
+bool bootOk = false;                       // result of the boot check, for the "# i2c" line
 
 // ---- GSR ----
 const byte GSR_PIN = A0;
@@ -35,6 +40,23 @@ const uint32_t I2C_GUARD_US   = 700;
 uint32_t nextGsrCheck = 0;                 // previousMicros of the original scheduler
 uint32_t lastSensorPoll = 0;
 uint32_t lateTicks = 0, resyncs = 0;
+
+// ---- sensor outage (hot-plug) ----
+// The sensor delivers 100 samples/s whether or not a finger is on it, so a silent FIFO
+// means it is gone (an absent sensor reads back FIFO pointers 0/0) or was power-cycled
+// and lost its configuration. Either way: report NO_SENSOR, re-probe, run setup again.
+const uint32_t SENSOR_LOST_US    = 1000000;  // no FIFO sample this long -> sensor lost
+const uint32_t PROBE_INTERVAL_US = 2000000;  // re-probe a missing sensor this often
+const byte EV_LOST = 1, EV_FOUND = 2;
+uint32_t lastHrSample = 0;                 // micros() of the last FIFO sample (or of setup)
+uint32_t lastProbe = 0;
+byte sensorEvent = 0;                      // pending "# MAX3010x lost/found" comment
+
+// ---- BPM validator counters, printed and cleared with the 10 s "# late=" line ----
+uint16_t rejShort = 0;                     // rs: interval too short (extra peak)
+uint16_t rejLong = 0;                      // rl: interval too long (missed beat, or > MAX_IBI)
+uint16_t reacqReject = 0;                  // rq: re-acquire after MAX_CONSEC_REJECT rejects
+uint16_t reacqTimeout = 0;                 // to: re-acquire after BEAT_TIMEOUT_MS without a beat
 
 // ---- I2C boot check (see startSensor) ----
 const uint32_t I2C_TIMEOUT_US = 3000;      // a stuck bus must not freeze the GSR stream
@@ -173,6 +195,7 @@ void handlePeak(uint32_t tPeak) {
   if (ibi > MAX_IBI) {                           // missed beats / pause: restart the chain
     lastPeakT = tPeak;
     rejectedTotal++;
+    rejLong++;
     return;
   }
 
@@ -180,10 +203,12 @@ void handlePeak(uint32_t tPeak) {
     // Extra peak (noise / dicrotic notch). Keep lastPeakT so the next real
     // beat is still measured from the previous real beat.
     rejectedTotal++;
+    rejShort++;
     consecReject++;
   } else if (ref && ibi > ref * (1.0 + OUTLIER_FRAC)) {
     lastPeakT = tPeak;                           // probably a missed beat
     rejectedTotal++;
+    rejLong++;
     consecReject++;
   } else {
     lastPeakT = tPeak;
@@ -208,7 +233,15 @@ void handlePeak(uint32_t tPeak) {
   } else if (consecReject >= MAX_CONSEC_REJECT) {
     clearBeats();
     state = ACQUIRING;
+    reacqReject++;
   }
+}
+
+void resetDetector() {
+  state = NO_FINGER;
+  clearBeats();
+  lastPeakT = 0;
+  env = sig = sig1 = sig2 = 0;
 }
 
 void processSample(uint32_t raw) {
@@ -218,12 +251,7 @@ void processSample(uint32_t raw) {
   uint32_t t = sampleCount * SAMPLE_MS;
 
   if (raw < FINGER_THRESHOLD) {
-    if (state != NO_FINGER) {
-      state = NO_FINGER;
-      clearBeats();
-      lastPeakT = 0;
-      env = sig = sig1 = sig2 = 0;
-    }
+    if (state != NO_FINGER) resetDetector();
     return;
   }
 
@@ -263,6 +291,7 @@ void processSample(uint32_t raw) {
     clearBeats();
     lastAcceptT = t;
     state = ACQUIRING;
+    reacqTimeout++;
   }
 }
 
@@ -314,7 +343,7 @@ void printGsrReport() {
 void printHrReport() {
   Serial.print(F("HR   "));
   if (!sensorOk) {
-    Serial.println(F("-> NOT FOUND: check SDA=A4, SCL=A5, VIN, GND (reset after fixing)"));
+    Serial.println(F("-> NOT FOUND: check SDA=A4, SCL=A5, VIN, GND (re-probed every 2 s)"));
     return;
   }
   Serial.print(F("ir=")); Serial.print(lastIr);                          // latest raw IR reading (18-bit)
@@ -444,26 +473,46 @@ void printI2cBootReport() {
   if (i2cClear == CLEAR_NOT_RUN)     Serial.print('-');
   else if (i2cClear == CLEAR_STUCK)  Serial.print('x');
   else                               Serial.print(i2cClear);
-  Serial.println(sensorOk ? F(" OK") : F(" FAIL"));
+  Serial.println(bootOk ? F(" OK") : F(" FAIL"));
+}
+
+void configureSensor() {
+  sensor.setup(LED_BRIGHTNESS, SAMPLE_AVERAGE, LED_MODE, SAMPLE_RATE, PULSE_WIDTH, ADC_RANGE);
+  sensor.setPulseAmplitudeRed(0x0A);            // red unused for BPM; keep it dim
+}
+
+// Runtime re-probe: one address ping (fast NAK when absent; at most one I2C_TIMEOUT_US
+// on a stuck bus), then the part ID check and the full configuration (a few ms).
+// No bus clear and no retries here: those are boot-only (startSensor).
+bool probeSensor() {
+  Wire.beginTransmission(MAX30105_ADDRESS);
+  if (Wire.endTransmission() != 0) return false;
+  if (!sensor.begin(Wire, I2C_SPEED_FAST)) return false;
+  configureSensor();
+  return true;
+}
+
+void sensorLost() {
+  sensorOk = false;
+  while (sensor.available()) sensor.nextSample();  // drop stale buffered samples (no I2C)
+  resetDetector();
+  sensorEvent = EV_LOST;
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.println(F("# polygraph ready (send t = test mode, s = stream mode)"));
 
-  sensorOk = startSensor();
+  hpf.design(true, 0.7, 0.7071);                // removes DC + breathing drift
+  lpf.design(false, 3.5, 0.7071);               // removes noise / dicrotic detail
+  bootOk = sensorOk = startSensor();
   printI2cBootReport();
-  if (sensorOk) {
-    sensor.setup(LED_BRIGHTNESS, SAMPLE_AVERAGE, LED_MODE, SAMPLE_RATE, PULSE_WIDTH, ADC_RANGE);
-    sensor.setPulseAmplitudeRed(0x0A);          // red unused for BPM; keep it dim
-    hpf.design(true, 0.7, 0.7071);              // removes DC + breathing drift
-    lpf.design(false, 3.5, 0.7071);             // removes noise / dicrotic detail
-  } else {
-    Serial.println(F("# MAX3010x not found"));
-  }
+  if (sensorOk) configureSensor();
+  else          Serial.println(F("# MAX3010x not found"));
+  Wire.clearWireTimeoutFlag();
 
   nextGsrCheck = micros();
-  lastSensorPoll = nextGsrCheck;
+  lastSensorPoll = lastHrSample = lastProbe = nextGsrCheck;
 }
 
 void loop() {
@@ -498,19 +547,45 @@ void loop() {
   }
 
   // (b) MAX30102: one sample per iteration, never right before a GSR tick.
+  //     A missing sensor is re-probed instead (see "sensor outage" at the top).
+  bool i2cWindow = (GSR_INTERVAL_US - behind) > I2C_GUARD_US;
   if (sensorOk) {
     if (sensor.available()) {
       uint32_t ir = sensor.getFIFOIR();
       sensor.nextSample();
+      lastHrSample = now;
       processSample(ir);
       return;
     }
-    if (now - lastSensorPoll >= SENSOR_POLL_US &&
-        (GSR_INTERVAL_US - behind) > I2C_GUARD_US) {
+    if (now - lastSensorPoll >= SENSOR_POLL_US && i2cWindow) {
       lastSensorPoll = now;
       sensor.check();                            // fills the library's buffer; samples consumed above
+      if (Wire.getWireTimeoutFlag()) {           // stuck bus: stop polling before it stalls GSR again
+        Wire.clearWireTimeoutFlag();
+        sensorLost();
+        lastProbe = now;                         // first re-probe after a full interval
+      }
       return;
     }
+    if (now - lastHrSample >= SENSOR_LOST_US) {  // FIFO silent: unplugged or power-cycled
+      sensorLost();
+      lastProbe = now - PROBE_INTERVAL_US;       // re-probe at the next I2C window
+      return;
+    }
+  } else if (now - lastProbe >= PROBE_INTERVAL_US && i2cWindow) {
+    lastProbe = now;
+    bool found = probeSensor();
+    if (Wire.getWireTimeoutFlag()) {
+      Wire.clearWireTimeoutFlag();
+      found = false;
+    }
+    if (found) {
+      sensorOk = true;
+      resetDetector();
+      lastHrSample = lastSensorPoll = micros();
+      sensorEvent = EV_FOUND;
+    }
+    return;
   }
 
   // (c) 1 Hz heart-rate line and 10 s timing self-check (stream mode),
@@ -518,6 +593,11 @@ void loop() {
   //     separate iterations so one print never blocks for long.
   uint32_t ms = millis();
   handleSerial();
+  if (sensorEvent) {
+    Serial.println(sensorEvent == EV_LOST ? F("# MAX3010x lost") : F("# MAX3010x found"));
+    sensorEvent = 0;
+    return;
+  }
   if (testMode) {
     if (beatIbi) {
       Serial.print(F("  beat  ibi=")); Serial.print(beatIbi);
@@ -546,8 +626,17 @@ void loop() {
     Serial.print(F(" resync="));
     Serial.print(resyncs);
     Serial.print(F(" hr="));                     // HR samples in the last ~10 s (expect ~1000)
-    Serial.println(hrCount);
+    Serial.print(hrCount);
+    Serial.print(F(" rs="));                     // BPM validator counts in the last ~10 s (see top)
+    Serial.print(rejShort);
+    Serial.print(F(" rl="));
+    Serial.print(rejLong);
+    Serial.print(F(" rq="));
+    Serial.print(reacqReject);
+    Serial.print(F(" to="));
+    Serial.println(reacqTimeout);
     hrCount = 0;
+    rejShort = rejLong = reacqReject = reacqTimeout = 0;
     i2cLinePending = true;                       // repeated: the app flushes the boot-time copy
   } else if (i2cLinePending) {
     i2cLinePending = false;

@@ -9,3 +9,6 @@ build/
 dist/
 *.spec
 python_app/_version.py
+
+# Local copies of released exes and their recordings
+releases/

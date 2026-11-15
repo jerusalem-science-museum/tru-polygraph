@@ -10,13 +10,17 @@ A science-museum "polygraph" exhibit. The repo is split by language:
   - [arduino/polygraph/polygraph.ino](arduino/polygraph/polygraph.ino): the current combined firmware (GSR at 500 Hz on A0 plus the MAX30102 BPM detector over I2C, one 115200-baud serial stream). Protocol and wiring: [arduino/polygraph/README.md](arduino/polygraph/README.md).
   - `arduino/legacy/`: old standalone sketches and MATLAB checks, kept for reference (`bpm_detector/`, `checking_GSR/`, `checking ECG/`).
 - `python_app/`: the Python desktop app that reads the serial stream (`main.py`, `config.py`, `arduino.py`, `records.py`, `plotting.py`, `gsr_filters.py`, `gsr_diagnostics.py`; questions and tunables live in `config.toml`, loaded by `config.py`; see [python_app/readme.md](python_app/readme.md) and `python_app/NOISE_ANALYSIS.md`). Recordings go to `python_app/measurements/` (gitignored).
-- `plan.md`, `todo.md`, `todo_15.10.md`: planning notes.
+- `plan.md`, `todo.md`: planning notes. `GLOSSARY.md`: domain terms (question mark, answer mark, lock, sensor outage, connection loss). `docs/known-issues.md`: known, deliberately unfixed problems.
 
 The BPM detector in `polygraph.ino` is ported from [arduino/legacy/bpm_detector/bpm_detector.ino](arduino/legacy/bpm_detector/bpm_detector.ino), the robust standalone detector: it drains the sensor FIFO at a fixed 100 Hz, timed by sample count rather than `millis()`, then runs a biquad band-pass (0.7–3.5 Hz), an adaptive-threshold peak detector with a refractory period, and validation of each beat interval against the median of recent intervals. The section "How bpm_detector.ino works" below describes that legacy sketch.
 
 ## Build / upload
 
-There is no build config, board definition, or test suite in the repo. The sketch README wires the sensor to an Arduino Uno (SDA=A4, SCL=A5), but no FQBN is recorded; verify on hardware via the serial output. Arduino requires the sketch folder name to match the `.ino` name, so keep `arduino/polygraph/polygraph.ino` paired.
+There is no build config or test suite in the repo; verify on hardware via the serial output. The board is a classic Nano clone with the **old bootloader**, FQBN `arduino:avr:nano:cpu=atmega328old` (plain `arduino:avr:nano` hangs on upload), usually on `COM5` (SDA=A4, SCL=A5). Arduino requires the sketch folder name to match the `.ino` name, so keep `arduino/polygraph/polygraph.ino` paired.
+
+`arduino-cli` is the one bundled with Arduino IDE 2 (`C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe`, on the user PATH).
+
+**Uploads sometimes hang.** Compile separately, then upload under a timeout. If avrdude shows no progress for 10 s, abort and retry (up to 3 tries) instead of waiting. Close anything holding the port (the app, a serial monitor) first.
 
 Dependency: **SparkFun MAX3010x Pulse and Proximity Sensor Library** (provides `MAX30105.h` and `heartRate.h`; the MAX30105 driver also drives the MAX30102).
 
@@ -24,9 +28,9 @@ With `arduino-cli` (substitute the real FQBN and port):
 
 ```
 arduino-cli lib install "SparkFun MAX3010x Pulse and Proximity Sensor Library"
-arduino-cli compile --fqbn <fqbn> arduino/polygraph
-arduino-cli upload  --fqbn <fqbn> -p <port> arduino/polygraph
-arduino-cli monitor -p <port> -c baudrate=115200
+arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old arduino/polygraph
+timeout 25 arduino-cli upload --fqbn arduino:avr:nano:cpu=atmega328old -p COM5 arduino/polygraph   # retry if it times out
+arduino-cli monitor -p COM5 -c baudrate=115200
 ```
 
 ## How bpm_detector.ino works

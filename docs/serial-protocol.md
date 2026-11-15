@@ -33,7 +33,7 @@ Timing edge cases (all in `loop()` part (a)):
 - **Jitter.** A tick can start late if the loop was busy with an I2C read or a blocked `Serial.print`. The timestamp is the real time of that sample, so spacing is not perfectly uniform. Ticks more than 500 µs late (`LATE_US`) are counted in `lateTicks`.
 - **Catch-up.** A tick that is late by up to 10 ms is followed by its successors as fast as possible until the schedule is caught up, so a few samples may be closer together than 2000 µs.
 - **Resync (gap).** If the loop falls more than 10 ms behind (`RESYNC_US = 10000`), the schedule jumps to "now" without producing catch-up samples. The missed samples are simply absent, which shows up as a gap of more than 2000 µs in `t_us`. The event is counted in `resyncs`. The app's filter resamples over such gaps (see [filters-gsr.md](filters-gsr.md#gaps-and-sample-rate)).
-- GSR sampling has priority over everything else. The loop does at most one task per iteration and never calls `delay()`.
+- GSR sampling has priority over everything else. The loop does at most one task per iteration and never calls `delay()` (the one exception: reconfiguring a reconnected heart-rate sensor runs the library's `sensor.setup()`, which can wait up to a few ms for the sensor's soft reset).
 
 The same `<t_us>,<raw_adc>` format was used by the older `arduino/legacy/checking_GSR/.../checking_GSR.ino`. The difference is that the old sketch sent the loop-entry time rather than the time just before `analogRead`.
 
@@ -58,7 +58,13 @@ Emitted by `printBpmLine()`.
 | `SETTLING` | Finger just detected; filters settle for `SETTLE_SAMPLES` = 150 samples (1.5 s) | 0 |
 | `ACQUIRING` | Looking for consistent beats (fewer than `MIN_BEATS_LOCK` = 4 accepted intervals), or re-acquiring after too many rejects or a timeout | 0 |
 | `LOCKED` | At least 4 consistent intervals; `bpm` is valid | 40–180 |
-| `NO_SENSOR` | The MAX30102 did not answer on I2C at startup (`sensor.begin()` failed). GSR keeps streaming. It is detected only at boot, so after fixing the wiring the board must be reset. | 0 |
+| `NO_SENSOR` | Sensor outage: the MAX30102 did not answer at startup (`sensor.begin()` failed), or it was lost while running (see below). GSR keeps streaming. The sensor is re-probed every 2 s, so no reset is needed after reconnecting it. | 0 |
+
+**Sensor outage at runtime** (`loop()` part (b), `sensorLost()`, `probeSensor()`):
+
+- The sensor produces 100 FIFO samples/s with or without a finger. If no sample arrives for 1 s (`SENSOR_LOST_US`), or a FIFO poll hits an I2C timeout (`Wire.getWireTimeoutFlag()`, stuck bus), the sensor is marked lost: the detector is reset, `# MAX3010x lost` is printed, and from the next `B` line the state is `NO_SENSOR`. An unplugged sensor reads back FIFO pointers 0/0 (no samples), and a power-cycled one has lost its configuration and produces none, so both are caught by the 1 s rule.
+- While missing (since boot or since a loss), the sensor is probed every 2 s (`PROBE_INTERVAL_US`), only when the next GSR tick is more than `I2C_GUARD_US` away. A probe is one address ping (about 0.1 ms with nothing connected, at most one 3 ms I2C timeout on a stuck bus). On an answer it checks the part ID, runs the boot-time `sensor.setup(...)` (a few ms; a few GSR ticks are late, none are dropped), and prints `# MAX3010x found`. The first probe after a 1 s silence happens right away, the first after an I2C timeout 2 s later. There is no bus clear at runtime.
+- After a reconnect the state starts again at `NO_FINGER`.
 
 ### 3. Comment lines: `# <text>`
 
@@ -68,8 +74,10 @@ Every line starting with `#` is informational. The app's `parse_line()` returns 
 |---|---|---|
 | `# polygraph ready (send t = test mode, s = stream mode)` | Once at startup (`setup()`) | |
 | `# MAX3010x not found` | Once at startup if the heart-rate sensor is missing | Followed by `B,…,0,NO_SENSOR` lines every second |
-| `# late=<n> resync=<n> hr=<n>` | Every 10 s in stream mode (`ms - lastDiag >= 10000`). The first one comes about 10 s after boot. It is sent on a different loop iteration from the `B` line. | `late`: GSR ticks more than 500 µs late, **cumulative since boot**. `resync`: schedule resyncs (gaps), cumulative since boot. `hr`: MAX30102 samples processed **since the previous diagnostic line**; expect about 1000 (100 Hz × 10 s). Near 0 means the sensor is starved or missing (always 0 with `NO_SENSOR`). |
-| `# i2c f=<mV>,<mV> p=<mV>,<mV> t=<n> e=<n> id=<hex> c=<-\|n\|x> OK\|FAIL` | Once at startup, then every 10 s in stream mode | Result of the sensor start-up check. Field meanings are in [arduino/polygraph/README.md](../arduino/polygraph/README.md#i2c-boot-check). |
+| `# MAX3010x lost` | When the sensor stops delivering samples at runtime (sensor outage, see above) | Followed by `B,…,0,NO_SENSOR` lines every second |
+| `# MAX3010x found` | When a re-probe finds the sensor and it has been configured again | `B` lines continue from `NO_FINGER` |
+| `# late=<n> resync=<n> hr=<n> rs=<n> rl=<n> rq=<n> to=<n>` | Every 10 s in stream mode (`ms - lastDiag >= 10000`). The first one comes about 10 s after boot. It is sent on a different loop iteration from the `B` line. | `late`: GSR ticks more than 500 µs late, **cumulative since boot**. `resync`: schedule resyncs (gaps), cumulative since boot. The rest count **since the previous diagnostic line** (cleared after each print): `hr`: MAX30102 samples processed; expect about 1000 (100 Hz × 10 s). Near 0 means the sensor is starved or missing (always 0 with `NO_SENSOR`). `rs`: beat intervals rejected as too short (extra peak). `rl`: beat intervals rejected as too long (missed beat, or longer than `MAX_IBI` = 1500 ms). `rq`: re-acquires after `MAX_CONSEC_REJECT` (4) rejects in a row. `to`: re-acquires after `BEAT_TIMEOUT_MS` (3 s) without an accepted beat. A lock drop that isn't a `NO_FINGER` shows up as `rq` or `to`. |
+| `# i2c f=<mV>,<mV> p=<mV>,<mV> t=<n> e=<n> id=<hex> c=<-\|n\|x> OK\|FAIL` | Once at startup, then every 10 s in stream mode | Result of the sensor start-up check. It always describes the boot check, even after a later outage or reconnect. Field meanings are in [arduino/polygraph/README.md](../arduino/polygraph/README.md#i2c-boot-check). |
 | `# TEST MODE: one GSR and one HR line per second. Send s to go back to stream mode.` | After `t` is received | Preceded by one empty line |
 | `# stream mode` | After `s` is received in test mode | |
 
@@ -96,7 +104,7 @@ HR   ir=118532 pulse=405 LOCKED bpm=73 sps=100 ok=12 rej=1  -> OK
 | `HR bpm=` | Same rule as the `B` line: 0 unless `LOCKED` |
 | `HR sps=` | MAX30102 samples processed in that second (expect about 100) |
 | `ok=` / `rej=` | Accepted / rejected beat intervals since boot (`acceptedTotal`, `rejectedTotal`) |
-| HR verdict | `NOT FOUND` (no sensor; whole line is `HR   -> NOT FOUND: …`), `NO SAMPLES`, `SATURATED` (ir > 250000, `IR_SATURATED`), `no finger`, `finger detected, settling...`, `looking for steady beats, keep still`, else `OK` |
+| HR verdict | `NOT FOUND` (sensor outage, at boot or later; whole line is `HR   -> NOT FOUND: …`), `NO SAMPLES`, `SATURATED` (ir > 250000, `IR_SATURATED`), `no finger`, `finger detected, settling...`, `looking for steady beats, keep still`, else `OK` |
 | `beat ibi=` | Interval of an accepted beat in ms, followed by `60000 / ibi` in BPM. The division is an integer division, so it truncates, unlike the rounded `bpm` value. |
 
 ## How the app reads the stream

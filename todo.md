@@ -1,4 +1,3 @@
-1. the app currently reads data from the gsr only. let's add the bpm and mark the time it was received as well. 
-2. in the final result there should be another measurement on the graph of the bpm, in addition to the bpm measurements being saved in the csv as well.
-3. when answering a question, instead of a textbox there should just be radiobuttons for yes/no/undefined that can alt. be pressed with 1/2/3/ respectively (no enter needed). make sure that marking the time can be done with enter as well as pressing on the "mark question time" button.
-4. the gsr code supposedly filters 50hz but we still see noise in the data. what could it be and how do we clean it? add some diagnostics so we can understand better. maybe a fourier transform/spectrogram or anything else that could be useful. also give some insight if you see anything in the code that could be causing this.
+- new ino code is faulty. v1.1 works, v1.2 can never seem to acquire a good bpm reading.
+- hot reload - we wanted in v1.2 to hot reload the connection for the hr monitor/arduino, but it doesn't look like it's working.
+- start timer after 1/2/3 and not space.
