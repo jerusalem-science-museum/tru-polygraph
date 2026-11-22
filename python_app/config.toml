@@ -5,7 +5,7 @@
 # Asked in this order. The examination moves on to classification after the last one.
 # PLACEHOLDER questions: replace with the real ones.
 questions = [
-    "Is your name what you told us?",
+    "האם קוראים לך באמת אריאל??",
     "Have you ever told a lie?",
     "Did you enjoy your visit today?",
     "Have you been to this museum before?",
