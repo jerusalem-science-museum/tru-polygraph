@@ -5,14 +5,11 @@
 # Asked in this order. The examination moves on to classification after the last one.
 # PLACEHOLDER questions: replace with the real ones.
 questions = [
-    "Is your name what you told us?",
+    "האמנם באמת קוראים לך אריאל????",
     "Have you ever told a lie?",
     "Did you enjoy your visit today?",
     "Have you been to this museum before?",
     "Do you like chocolate?",
-    "Have you ever cheated in a game?",
-    "Did you have breakfast this morning?",
-    "Are you afraid of the dark?",
 ]
 
 # Choices for the subject's answer, selected with keys 1, 2, 3, ... (at most 9).
