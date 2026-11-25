@@ -4,12 +4,33 @@ One Arduino Uno/Nano sketch (`polygraph.ino`) that streams a GSR sensor at 500 H
 
 Library: **SparkFun MAX3010x Pulse and Proximity Sensor Library**.
 
-Full field-by-field documentation of the serial output, the saved CSVs and both filter chains: [docs/](../../docs/README.md).
+Full field-by-field documentation of the serial output, the saved CSVs and both filter chains: [docs/](https://github.com/jerusalem-science-museum/tru-polygraph/tree/main/docs).
+
+## Installation
+
+You need the Arduino IDE once, on any computer. After the sketch is uploaded, the Arduino keeps it.
+
+1. **Get the sketch.** Download `polygraph-<version>-arduino.zip` from the latest release on GitHub (Releases, under Assets) and unzip it. Keep the `polygraph` folder as it is: Arduino requires the folder name to match `polygraph.ino`.
+2. **Install the Arduino IDE** from arduino.cc/en/software.
+3. **Install the library.** In the IDE open **Tools -> Manage Libraries**, search for **SparkFun MAX3010x**, and install "SparkFun MAX3010x Pulse and Proximity Sensor Library".
+4. **Open the sketch.** **File -> Open** and choose `polygraph/polygraph.ino`.
+5. **Choose the board.** Plug in the Arduino with a USB cable, then set:
+   - **Tools -> Board -> Arduino AVR Boards -> Arduino Nano**
+   - **Tools -> Processor -> ATmega328P (Old Bootloader)** (the exhibit's Nano clone needs this; with the plain ATmega328P the upload hangs)
+   - **Tools -> Port**: the Arduino's COM port (usually `COM5`; unplug it and see which one disappears if unsure)
+6. **Close the polygraph app** (and any serial monitor), because only one program can use the port.
+7. **Upload.** Click the right-arrow button. It ends with "Done uploading". If it sits without progress for more than ~10 seconds, unplug the USB cable, plug it back in, and try again.
+8. **Check it.** Open **Tools -> Serial Monitor** at **115200 baud**. You should see `# polygraph ready` followed by a fast stream of numbers. Send `t` for a readable sensor check (see [Test mode](#test-mode-checking-the-sensors-by-hand)). Close the Serial Monitor before starting the app.
+
+With `arduino-cli` instead of the IDE, from the folder that contains `polygraph/`:
 
 ```
-arduino-cli compile --fqbn arduino:avr:uno polygraph
-arduino-cli upload  --fqbn arduino:avr:uno -p <port> polygraph
+arduino-cli lib install "SparkFun MAX3010x Pulse and Proximity Sensor Library"
+arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old polygraph
+arduino-cli upload  --fqbn arduino:avr:nano:cpu=atmega328old -p COM5 polygraph
 ```
+
+The rest of this page explains how the firmware works.
 
 ## Wiring
 

@@ -47,4 +47,4 @@ User-facing docs (wiring, serial output fields, tuning table, troubleshooting) l
 
 ## Release build (Python app)
 
-Publishing a GitHub release runs `.github/workflows/release.yml`, which builds a PyInstaller `--onefile` exe (console kept) from `python_app/main.py` and attaches it to the release; see [docs/releasing.md](docs/releasing.md). The workflow writes the git-ignored `python_app/_version.py` (shown in the window title). In a frozen build `OUTPUT_FOLDER` is `measurements/` next to the exe (created at startup). `gsr_diagnostics.py` is not packaged.
+Publishing a GitHub release runs `.github/workflows/release.yml`, which builds a PyInstaller `--onefile` exe (console kept) from `python_app/main.py` and attaches it to the release, plus `polygraph-<tag>-arduino.zip` of the `arduino/polygraph/` folder (its README's Installation section is the user-facing upload guide); see [docs/releasing.md](docs/releasing.md). The workflow writes the git-ignored `python_app/_version.py` (shown in the window title). In a frozen build `OUTPUT_FOLDER` is `measurements/` next to the exe (created at startup). `gsr_diagnostics.py` is not packaged.

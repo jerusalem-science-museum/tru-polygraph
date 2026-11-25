@@ -59,3 +59,22 @@ jobs:
       - name: Upload asset to release
         shell: bash
         run: gh release upload "$TAG" "dist/$ASSET" --clobber
+
+  firmware:
+    name: Package Arduino sketch
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip the sketch folder
+        # Arduino needs the folder name to match the .ino, so the zip keeps polygraph/ as its top folder.
+        run: |
+          cd arduino
+          zip -r "../polygraph-$TAG-arduino.zip" polygraph
+          unzip -l "../polygraph-$TAG-arduino.zip"
+
+      - name: Upload asset to release
+        run: gh release upload "$TAG" "polygraph-$TAG-arduino.zip" --clobber

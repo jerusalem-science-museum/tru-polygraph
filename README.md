@@ -10,7 +10,7 @@ A science-museum "polygraph" exhibit. A visitor rests their fingers on two GSR e
 
 ## Quick start
 
-1. Flash the firmware: see [arduino/polygraph/README.md](arduino/polygraph/README.md) for wiring, the required library and upload steps.
+1. Flash the firmware: download `polygraph-<version>-arduino.zip` from the latest GitHub release and follow the Installation steps in its README ([arduino/polygraph/README.md](arduino/polygraph/README.md)), which also covers the wiring.
 2. Run the app:
 
    ```

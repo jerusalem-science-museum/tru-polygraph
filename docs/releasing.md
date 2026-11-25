@@ -10,7 +10,7 @@ Publishing a GitHub release builds a single-file executable of the Python app an
 
 ## Watch the build
 
-Open the **Actions** tab and select the "Build release binary" run. The "Set up job" step shows which Runner Image was used. The build takes a few minutes. When it succeeds, `polygraph-<tag>-windows.exe` appears under **Assets** on the release page. If the run fails, open the failed step for the log; after fixing, re-run the job from the Actions tab (the upload overwrites an existing asset).
+Open the **Actions** tab and select the "Build release binary" run. The "Set up job" step shows which Runner Image was used. The build takes a few minutes. When it succeeds, `polygraph-<tag>-windows.exe` appears under **Assets** on the release page, next to `polygraph-<tag>-arduino.zip` (the `arduino/polygraph/` sketch folder with its README, for uploading to the Arduino). If the run fails, open the failed step for the log; after fixing, re-run the job from the Actions tab (the upload overwrites an existing asset).
 
 ## Using the exe
 
