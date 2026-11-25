@@ -3,6 +3,13 @@ name: Build release binary
 on:
   release:
     types: [published]
+  # Rebuild the assets of an existing release from the branch picked in "Run workflow"
+  # (not from the tag), replacing them. The app still shows the given tag as its version.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to rebuild and replace the assets of, e.g. v1.4
+        required: true
 
 permissions:
   contents: write
@@ -16,12 +23,12 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            asset: polygraph-${{ github.event.release.tag_name }}-windows.exe
+            asset: polygraph-${{ github.event.release.tag_name || inputs.tag }}-windows.exe
           # Uncomment to also build for Linux Mint (Ubuntu-based).
           # - os: ubuntu-latest
-          #   asset: polygraph-${{ github.event.release.tag_name }}-linux
+          #   asset: polygraph-${{ github.event.release.tag_name || inputs.tag }}-linux
     env:
-      TAG: ${{ github.event.release.tag_name }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
       ASSET: ${{ matrix.asset }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -53,7 +60,8 @@ jobs:
           # Console window is kept on purpose (shows errors); do not add --windowed.
           BASE="${ASSET%.exe}"
           # config.toml is bundled so the exe can write it next to itself on first launch.
-          pyinstaller --onefile --name "$BASE" --paths python_app --add-data "python_app/config.toml:." python_app/main.py
+          # polygraph.ico is the exe's file icon (--icon) and, bundled, the window icon.
+          pyinstaller --onefile --name "$BASE" --icon python_app/polygraph.ico --paths python_app --add-data "python_app/config.toml:." --add-data "python_app/polygraph.ico:." python_app/main.py
           ls -l dist
 
       - name: Upload asset to release
@@ -64,7 +72,7 @@ jobs:
     name: Package Arduino sketch
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ github.event.release.tag_name }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4

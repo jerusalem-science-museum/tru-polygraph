@@ -19,6 +19,8 @@ if getattr(sys, "frozen", False):
 else:
     APP_FOLDER = Path(__file__).resolve().parent
 CONFIG_PATH = APP_FOLDER / "config.toml"
+# The window icon is bundled inside the exe (extracted to _MEIPASS), not placed next to it.
+ICON_PATH = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "polygraph.ico"
 OUTPUT_FOLDER = APP_FOLDER / "measurements"
 
 _NUMBER = (int, float)

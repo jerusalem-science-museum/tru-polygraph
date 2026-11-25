@@ -48,6 +48,7 @@ from config import (  # noqa: E402
     FLASH_MS,
     GSR_READING_STALE_SECONDS,
     GSR_SHORT_MIN,
+    ICON_PATH,
     LIE_FLASH_COLOR,
     MARK_DEBOUNCE_SECONDS,
     MIN_QUESTION_GAP_SECONDS,
@@ -223,6 +224,12 @@ class PolygraphApp(tk.Tk):
         super().__init__()
         OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
         self.title(f"Polygraph {VERSION}")
+        # default= also gives every Toplevel (recording viewer, dialogs) the icon.
+        # .ico works on Windows only; elsewhere keep Tk's default icon.
+        try:
+            self.iconbitmap(default=str(ICON_PATH))
+        except tk.TclError:
+            pass
         self.geometry("800x560")
         self.minsize(700, 480)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
