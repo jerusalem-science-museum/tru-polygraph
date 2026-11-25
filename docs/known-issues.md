@@ -9,11 +9,6 @@ Problems found during testing that are not worth fixing yet. Each entry says wha
 - **Cause:** unknown. The firmware prints a fresh `micros()` per line, so it cannot repeat itself in normal operation; candidates are the USB-serial chip or driver, or a firmware crash and restart. A raw-stream check also showed the board restarting by itself once (uptime 33 s and 143 s), possibly a late reset from opening the port.
 - **Likely fix:** in the app, drop any GSR or BPM sample whose unwrapped Arduino time is not later than the previous one.
 
-## The app stays on the question screen after "Save anyway?" -> No
-
-- **Seen:** when an examination ends with no saved questions, the app asks whether to save the voltage recording anyway. Answering **No** stops the recording but leaves the question screen up with nothing to do. Ending the examination from the "Connection lost" bubble behaves the same way.
-- **Likely fix:** after **No**, return to the setup screen.
-
 ## Heart-rate sensor unplugged in the middle of an I2C transfer
 
 - **Seen (not tested):** if the sensor is pulled out mid-read, it can be left holding the SDA line low. The firmware only clears a stuck bus at boot, so the sensor may stay "lost" until the Arduino is reset.

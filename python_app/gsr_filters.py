@@ -199,3 +199,15 @@ FILTERS = {
     "lowpass_5Hz": lowpass,
     "clean_gsr": clean_gsr,
 }
+
+
+# ---------------------------------------------------------- conductance ---
+
+def conductance_us(volts):
+    """Skin conductance in microsiemens from the (filtered) GSR voltage.
+
+    The project's formula, G = V / (10**6 - V * 10**5) * 10**6, set by the sensor
+    circuit. Accepts a scalar or an array; returns the same shape (as float).
+    """
+    v = np.asarray(volts, dtype=float)
+    return v / (1e6 - v * 1e5) * 1e6

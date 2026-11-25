@@ -1,3 +1,14 @@
-- new ino code is faulty. v1.1 works, v1.2 can never seem to acquire a good bpm reading.
-- hot reload - we wanted in v1.2 to hot reload the connection for the hr monitor/arduino, but it doesn't look like it's working.
-- start timer after 1/2/3 and not space.
+- הקוד/הממשק ישמור שני קבצים: voltage,bpm לכל נבדק. הקובץ question יווצר פעם אחת ויתעדכן כל בדיקה. העמודות הרלוונטיות הן: 
+
+	
+	question_number
+subject_answer	answer_type,	answer_time_s,
+
+נוסיף עוד חמש עמודות חדשות: זמן של תחילת השאלה, זמן של סוף השאלה, תוכן השאלה, שם הקובץ (שם הנבדק, תאריך ושעה), ומה הפוליגרף זיהה. כרגע בגלל שאין לנו זיהוי אמיתי עדיין, נכתוב undefined וזה יתעדכן אחרי שנטמיע את האלגוריתם לזיהוי שקרים. 
+- הממשק יציג גרף של מוליכות כתלות בזמן (לא מתח) ע"י הנוסחה הבאה:
+V = data["filtered_voltage_v"]
+data["G"] =( V / (10**6 - V * 10**5)) * 10**6
+
+- בנוסף, הגרף ייראה את שלושת סימוני השאלות לפי בחירתי (toggle), כדי לא ליצור עומס. 
+בסוף, שישמור את התמונה של הגרף לפי מה שקבענו עד עכשיו - זמן סוף השאלה. 
+- שתהיה אפשרות בממשק גם לעלות את הקבצים ולקבל את הגרף (אם נגיד אני רוצה לשמור תמונה עם סימון אחר, או פשוט להסתכל על הדאטה בצורה אחרת מתמונה). 

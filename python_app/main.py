@@ -16,7 +16,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from tkinter import font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import serial
 from serial import SerialException
@@ -27,13 +27,17 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 from arduino import ADC_MAX, MicrosUnwrapper, detect_arduino, parse_line  # noqa: E402
 from records import (  # noqa: E402
+    SHARED_QUESTIONS_FILENAME,
     BpmReading,
     Question,
+    QuestionsFileMismatch,
     Sample,
+    append_shared_questions,
+    question_rows,
     safe_filename,
     save_examination,
+    write_fallback_questions,
 )
-from plotting import plot_examination  # noqa: E402
 from config import (  # noqa: E402
     ADC_REFERENCE_VOLTS,
     ANSWER_CHOICES,
@@ -66,6 +70,10 @@ ANSWER_HINT = ", ".join(f"{number} = {choice}" for number, choice in enumerate(A
 QUESTION_WRAP_PIXELS = 640
 RLE, PDF = chr(0x202B), chr(0x202C)  # Unicode marks: start and end of right-to-left text.
 HELD_BPM_COLOR = "#8a8a8a"
+# Windows sends repeated presses (no releases) while a key is held, the first after the
+# keyboard repeat delay (0.25-1 s). A Space press within this time of the previous one, with
+# no release in between, is a repeat and must not set a second mark.
+KEY_REPEAT_WINDOW_SECONDS = 1.0
 
 
 def heart_rate_display(
@@ -134,6 +142,82 @@ def wrap_rtl(text: str, font: tkfont.Font, width: int) -> str:
     return "\n".join(f"{RLE}{line}{PDF}" for line in lines)
 
 
+def build_question_table(parent: tk.Misc, rows: list[tuple]):
+    """Pack a scrollable table of questions into parent; returns the mouse-wheel handler.
+
+    Each row is (number, question text, answer, truth/lie, prediction, certainty). The caller
+    binds the returned handler to <MouseWheel> on the table's toplevel window.
+    """
+    table_frame = ttk.Frame(parent)
+    table_frame.pack(fill="both", expand=True)
+    table_frame.columnconfigure(0, weight=1)
+    table_frame.rowconfigure(1, weight=1)
+    # A grid of labels, not a ttk.Treeview: Treeview rows share one height, so text can't wrap.
+    cell_padx, cell_pady = 6, 5
+    columns = (  # (heading, fixed width or 0 to take the remaining space, anchor)
+        ("#", 40, "center"),
+        ("Question", 0, "w"),
+        ("Answer", 90, "center"),
+        ("Truth/Lie", 90, "center"),
+        ("Prediction", 110, "center"),
+        ("Certainty", 90, "center"),
+    )
+    fixed_width = sum(width for _heading, width, _anchor in columns)
+
+    header = tk.Frame(table_frame, bg="#e0e0e0")
+    header.grid(row=0, column=0, sticky="ew")
+    canvas = tk.Canvas(table_frame, bg="white", highlightthickness=0)
+    canvas.grid(row=1, column=0, sticky="nsew")
+    scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
+    scrollbar.grid(row=1, column=1, sticky="ns")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    rows_frame = tk.Frame(canvas, bg="white")
+    rows_window = canvas.create_window(0, 0, anchor="nw", window=rows_frame)
+
+    for frame in (header, rows_frame):
+        for index, (_heading, width, _anchor) in enumerate(columns):
+            frame.columnconfigure(index, minsize=width, weight=0 if width else 1)
+    for index, (heading, _width, anchor) in enumerate(columns):
+        tk.Label(
+            header, text=heading, font=("Segoe UI", 11, "bold"), bg="#e0e0e0", anchor=anchor,
+            padx=cell_padx, pady=cell_pady,
+        ).grid(row=0, column=index, sticky="nsew")
+
+    body_font = tkfont.Font(family="Segoe UI", size=12)
+    question_labels: list[tuple[tk.Label, str]] = []
+    for row, values in enumerate(rows):
+        text = str(values[1])
+        background = "white" if row % 2 == 0 else "#f3f3f3"
+        for index, (value, (_heading, _width, anchor)) in enumerate(zip(values, columns)):
+            label = tk.Label(
+                rows_frame, text=str(value), font=body_font, bg=background, anchor=anchor,
+                justify="left", padx=cell_padx, pady=cell_pady,
+            )
+            label.grid(row=row, column=index, sticky="nsew")
+            if index == 1:
+                question_labels.append((label, text))
+                if is_rtl(text):
+                    label.config(anchor="e", justify="right")
+
+    def on_canvas_resize(event: tk.Event) -> None:
+        canvas.itemconfigure(rows_window, width=event.width)
+        wrap_width = max(100, event.width - fixed_width - 2 * cell_padx)
+        for label, text in question_labels:
+            if is_rtl(text):
+                label.config(text=wrap_rtl(text, body_font, wrap_width))
+            else:
+                label.config(wraplength=wrap_width)
+
+    def on_mouse_wheel(event: tk.Event) -> None:
+        over_table = str(event.widget).startswith(str(canvas))  # Not when pointing at the graph.
+        if over_table and rows_frame.winfo_height() > canvas.winfo_height():
+            canvas.yview_scroll(-event.delta // 120, "units")
+
+    canvas.bind("<Configure>", on_canvas_resize)
+    rows_frame.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    return on_mouse_wheel
+
+
 class PolygraphApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -182,7 +266,8 @@ class PolygraphApp(tk.Tk):
         self.rest_seconds = DEFAULT_REST_SECONDS
         self.test_seconds = DEFAULT_TEST_SECONDS
         self.truth_index = 0
-        self.last_saved_paths: tuple[Path, Path, Path] | None = None
+        self.last_saved_paths: tuple[Path, Path] | None = None  # (voltage, bpm) of the last save.
+        self.questions_saved_to: Path | None = None  # questions.csv, or the fallback file.
 
         # Time base: Arduino micros() unwrapped to 64 bit, shared by GSR and B lines.
         # time_s = (unwrapped_us - anchor_us) / 1e6 + anchor_offset_s, where the anchor
@@ -203,6 +288,9 @@ class PolygraphApp(tk.Tk):
         self.answer_var = tk.StringVar(value="")
         self.truth_var = tk.StringVar(value="")
         self.last_answer_saved_at = 0.0
+        self.last_mark_at = 0.0  # Time of the latest question start or end mark.
+        self.mark_key_down = False  # Space/Enter held (no release seen since its press).
+        self.mark_key_pressed_at = 0.0  # Latest Space/Enter press, auto-repeats included.
         self.last_undo_at = 0.0
 
         self.style = ttk.Style(self)
@@ -251,6 +339,22 @@ class PolygraphApp(tk.Tk):
         for sequence, handler in handlers.items():
             self.key_bindings.append((sequence, self.bind(sequence, self.unless_paused(handler))))
 
+    def bind_letter_keys(self, handlers: dict[str, object]) -> None:
+        """Bind letter shortcuts (lowercase letter -> handler) by physical key, so they work
+        on any keyboard layout: with a Hebrew layout the H key types a Hebrew letter (only
+        Shift+H types "H"), which a <Key-h> binding never sees. At most one call per screen,
+        since all letters share the window's single <Key> binding."""
+        def on_key(event: tk.Event):
+            if event.state & 0x4:  # Control held: leave Ctrl+letter shortcuts alone.
+                return None
+            for letter, handler in handlers.items():
+                # On Windows the keycode is the virtual-key code, which for A-Z is the
+                # uppercase letter's code whatever the layout.
+                if event.keysym.lower() == letter or (sys.platform == "win32" and event.keycode == ord(letter.upper())):
+                    return handler(event)
+            return None
+        self.bind_keys({"<Key>": on_key})
+
     def unbind_keys(self) -> None:
         for sequence, funcid in self.key_bindings:
             self.unbind(sequence, funcid)
@@ -276,6 +380,14 @@ class PolygraphApp(tk.Tk):
         ttk.Progressbar(self.container, mode="indeterminate", length=320).pack(pady=14)
         progress = self.container.winfo_children()[-1]
         progress.start(12)
+        self.add_open_recording_button()
+
+    def add_open_recording_button(self) -> None:
+        """Saved recordings can be viewed without the Arduino, so offer this on every
+        screen shown before an examination: connecting, connection error and setup."""
+        ttk.Button(
+            self.container, text="Open recording…", command=self.open_recording
+        ).pack(side="bottom", pady=(0, 4))
 
     def connection_needed(self) -> bool:
         """True while the app should look for the Arduino: before an examination, or after a
@@ -415,6 +527,7 @@ class PolygraphApp(tk.Tk):
                 self.retry_note_label.config(text=note)
             return
         self.clear_screen()
+        self.add_open_recording_button()
         ttk.Button(self.container, text="Try again now", command=self.retry_connection).pack(side="bottom", pady=10)
         ttk.Label(self.container, text="Arduino connection error", style="Title.TLabel").pack(pady=(30, 10))
         self.retry_note_label = ttk.Label(self.container, text=note, foreground="#6a6a6a")
@@ -435,7 +548,8 @@ class PolygraphApp(tk.Tk):
 
     def show_setup_screen(self) -> None:
         self.clear_screen()
-        # Start button is packed first (bottom) so it can never be clipped.
+        # Buttons are packed first (bottom) so they can never be clipped.
+        self.add_open_recording_button()
         self.setup_start_button = ttk.Button(
             self.container, text="Start examination", command=self.begin_examination
         )
@@ -483,6 +597,55 @@ class PolygraphApp(tk.Tk):
             "<Return>": self.on_setup_enter,
             "<KP_Enter>": self.on_setup_enter,
         })
+
+    def open_recording(self) -> None:
+        """Show the graph of a saved examination in its own window. Needs no Arduino."""
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Open recording",
+            initialdir=OUTPUT_FOLDER,
+            filetypes=[("Examination recordings", "*_voltage.csv")],
+        )
+        if not path:
+            return
+        voltage_path = Path(path)
+        stem = voltage_path.name.removesuffix("_voltage.csv")
+        window = tk.Toplevel(self)
+        window.title(stem)
+        window.geometry("1400x750")
+        window.minsize(1200, 450)
+        # Esc closes only this window, back to the main screen (the main window's Esc,
+        # which quits, is bound on the main window and does not reach this one).
+        window.bind("<Escape>", lambda _e: window.destroy())
+        # Same layout as the results screen: the question table to the left of the graph.
+        results = ttk.Frame(window, padding=12)
+        results.pack(fill="both", expand=True)
+        results.rowconfigure(0, weight=1)
+        results.columnconfigure(0, weight=2, minsize=640, uniform="results")
+        results.columnconfigure(1, weight=3, uniform="results")
+        table_pane = ttk.Frame(results)
+        table_pane.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        graph_pane = ttk.Frame(results)
+        graph_pane.grid(row=0, column=1, sticky="nsew")
+        try:
+            from graph_view import GraphView  # Loads matplotlib; imported on first use only.
+
+            view = GraphView(graph_pane, voltage_path, subject_name=None, save_default_png=False)
+        except Exception as error:  # ValueError/OSError: unreadable files; anything else is a bug.
+            window.destroy()
+            messagebox.showerror("Open recording", f"Could not show {voltage_path.name}:\n\n{error}", parent=self)
+            return
+        graph_pane.pack_propagate(False)  # The pane sets the graph's size, not the figure's.
+        view.pack(fill="both", expand=True)
+
+        ttk.Label(table_pane, text="Examination summary", style="Title.TLabel").pack(pady=(4, 8))
+        # Prediction is the saved detected_truth; the files keep no certainty.
+        rows = [(q.number, q.text, q.answer, q.truth, q.detected, "") for q in view.recording.questions]
+        if rows:
+            window.bind("<MouseWheel>", build_question_table(table_pane, rows))
+        else:
+            ttk.Label(table_pane, text=view.recording.questions_note or "No questions found.",
+                      foreground="#6a6a6a", wraplength=440).pack(expand=True)
 
     def on_setup_enter(self, _event=None) -> str:
         # Debounce: ignore Enter right after a previous attempt (e.g. dismissing the
@@ -581,13 +744,13 @@ class PolygraphApp(tk.Tk):
         action_row.pack(pady=4)
         self.mark_button = ttk.Button(
             action_row,
-            text="Mark question time (Space / Enter)",
+            text="Start question (Space / Enter)",
             command=self.mark_question,
             takefocus=False,  # Space must only reach the window-level handler.
         )
         self.mark_button.pack(side="left", padx=6)
         ttk.Button(
-            action_row, text="Undo (Backspace)", command=self.undo_last, takefocus=False
+            action_row, text="Undo answer (Backspace)", command=self.undo_last, takefocus=False
         ).pack(side="left", padx=6)
 
         answer_frame = ttk.Frame(self.container, style="Q.TFrame")
@@ -611,34 +774,38 @@ class PolygraphApp(tk.Tk):
 
         ttk.Label(
             self.container,
-            text="Press Space or Enter (or click) when the question is asked. "
-            f"Then press {ANSWER_HINT} when the subject answers. Backspace = undo. "
-            "Wait for \"Since last answer\" to say ready before the next question.",
+            text="Press Space or Enter (or click) when you start asking a question, and again when you "
+            f"finish asking. Then press {ANSWER_HINT} when the subject answers. "
+            "Backspace = undo the last answer. "
+            "Wait for \"Since last answer\" to say ready before starting the next question.",
             style="Q.TLabel",
             wraplength=640,
             justify="center",
         ).pack(pady=2)
         info_row = ttk.Frame(self.container, style="Q.TFrame")
         info_row.pack(pady=2)
-        self.status_label = ttk.Label(info_row, text="Waiting for question 1", style="Q.TLabel")
+        self.status_label = ttk.Label(info_row, text=self.waiting_status(1), style="Q.TLabel")
         self.status_label.pack(side="left", padx=12)
         self.heart_label = ttk.Label(info_row, text="", font=("Segoe UI", 12), style="Q.TLabel")
         self.heart_label.pack(side="left", padx=12)
         self.update_heart_label()
         self.warning_label = tk.Label(self.container, text="", font=("Segoe UI", 12, "bold"), bg=self.q_bg)
         self.warning_label.pack(pady=2)
+        self.mark_key_down = False
         handlers: dict[str, object] = {
-            "<Return>": self.on_enter_key,
-            "<KP_Enter>": self.on_enter_key,
-            "<space>": self.on_enter_key,
+            "<Return>": self.on_mark_key,
+            "<KP_Enter>": self.on_mark_key,
+            "<space>": self.on_mark_key,
+            "<KeyRelease-Return>": self.on_mark_key_release,
+            "<KeyRelease-KP_Enter>": self.on_mark_key_release,
+            "<KeyRelease-space>": self.on_mark_key_release,
             "<BackSpace>": lambda _e: self.undo_last(),
-            "<Key-f>": self.on_finish_key,
-            "<Key-F>": self.on_finish_key,
         }
         for number, choice in enumerate(ANSWER_CHOICES, start=1):
             handlers[f"<Key-{number}>"] = lambda _e, c=choice: self.answer_by_key(c)
             handlers[f"<KP_{number}>"] = lambda _e, c=choice: self.answer_by_key(c)
         self.bind_keys(handlers)
+        self.bind_letter_keys({"f": self.on_finish_key})
         self.update_test_timer()
 
     def show_question_text(self, label: ttk.Label, number: int) -> None:
@@ -649,12 +816,17 @@ class PolygraphApp(tk.Tk):
         else:
             label.config(text=text, wraplength=QUESTION_WRAP_PIXELS)
 
-    def on_enter_key(self, _event: object | None = None) -> None:
-        if self.finished or not self.recording or self.connection_lost or self.pending_question is not None:
-            return
-        if time.monotonic() - self.last_answer_saved_at < MARK_DEBOUNCE_SECONDS:
-            return  # Key repeat right after an answer must not mark the next question.
-        self.mark_question()
+    def on_mark_key(self, _event: object | None = None) -> None:
+        """Space / Enter / keypad Enter: the question start mark, then the question end mark."""
+        now = time.monotonic()
+        repeat = self.mark_key_down and now - self.mark_key_pressed_at < KEY_REPEAT_WINDOW_SECONDS
+        self.mark_key_down = True
+        self.mark_key_pressed_at = now
+        if not repeat:  # A held key must not set both marks.
+            self.mark_question()
+
+    def on_mark_key_release(self, _event: object | None = None) -> None:
+        self.mark_key_down = False
 
     def on_finish_key(self, _event: object | None = None) -> None:
         # F sits under the answering hand, so confirm (default No) before finishing.
@@ -665,7 +837,13 @@ class PolygraphApp(tk.Tk):
                 self.finish_measurement()
 
     def answer_by_key(self, choice: str) -> None:
-        if self.finished or self.connection_lost or self.pending_question is None:
+        question = self.pending_question
+        if self.finished or self.connection_lost or question is None:
+            return
+        if question.end_time_s is None:  # Still asking: the answer key is ignored.
+            self.status_label.config(
+                text=f"Press Space when you finish asking question {question.number}, then {ANSWER_HINT}"
+            )
             return
         self.answer_var.set(choice)
         self.save_answer()
@@ -713,34 +891,50 @@ class PolygraphApp(tk.Tk):
         return now - paused
 
     def record_answer_mark(self, question: Question) -> None:
-        question.answer_time_s, question.answer_pc_time_s = self.current_times()
+        question.answer_time_s = self.current_time_s()
         self.answer_clock_at[question.number] = self.operator_clock()
 
-    def current_times(self) -> tuple[float, float]:
-        """Return (arduino_based_time_s, pc_time_s) since recording start."""
+    def current_time_s(self) -> float:
+        """Arduino-based time since recording start, for the question and answer marks."""
         now = time.monotonic()
-        pc_time = now - self.recording_started_at
         if self.anchor_us is not None:
             # Same Arduino-based clock as the samples: last sample time plus the
             # PC time elapsed since that sample arrived.
-            return self.last_sample_time_s + (now - self.last_sample_received_at), pc_time
-        return pc_time, pc_time  # No sample yet: fall back to PC time.
+            return self.last_sample_time_s + (now - self.last_sample_received_at)
+        return now - self.recording_started_at  # No sample yet: fall back to PC time.
+
+    def waiting_status(self, number: int) -> str:
+        return f"Waiting for question {number} — press Space when you start asking"
 
     def mark_question(self) -> None:
-        if self.pending_question is not None or self.recording_started_at is None or self.connection_lost:
+        """Set the question start mark, or, while asking, the question end mark."""
+        if self.finished or not self.recording or self.recording_started_at is None or self.connection_lost:
             return
-        number = len(self.questions) + 1
-        question_time, pc_time = self.current_times()
-        self.pending_question = Question(number=number, time_s=question_time, pc_time_s=pc_time)
-        self.set_answer_mode(True)
-        self.status_label.config(
-            text=f"Question {number} marked at {question_time:.3f} s — press {ANSWER_HINT}"
-        )
+        now = time.monotonic()
+        question = self.pending_question
+        if question is None:
+            if now - self.last_answer_saved_at < MARK_DEBOUNCE_SECONDS:
+                return  # Key repeat right after an answer must not start the next question.
+            number = len(self.questions) + 1
+            self.pending_question = Question(number=number, start_time_s=self.current_time_s())
+            self.last_mark_at = now
+            self.set_question_stage("asking")
+            self.show_question_text(self.question_label, number)
+            self.status_label.config(text=f"Asking question {number}… press Space when you finish asking")
+        elif question.end_time_s is None:
+            if now - self.last_mark_at < MARK_DEBOUNCE_SECONDS:
+                return  # A double press must not set the start and end marks together.
+            question.end_time_s = self.current_time_s()
+            self.last_mark_at = now
+            self.set_question_stage("awaiting")
+            self.status_label.config(text=f"Question {question.number} asked — press {ANSWER_HINT}")
+        # Otherwise the question awaits its answer: Space does nothing.
+        self.focus_set()
 
     def save_answer(self) -> None:
         question = self.pending_question
-        if question is None or self.connection_lost:
-            return  # Nothing pending: a double press or stray click is ignored.
+        if question is None or question.end_time_s is None or self.connection_lost:
+            return  # Nothing awaiting an answer: a double press or stray click is ignored.
         answer = self.answer_var.get()
         if answer not in ANSWER_CHOICES:
             return
@@ -755,21 +949,20 @@ class PolygraphApp(tk.Tk):
         next_number = len(self.questions) + 1
         self.show_question_text(self.question_label, next_number)
         self.status_label.config(
-            text=(
-                f"Saved: Question {question.number} = {answer}. "
-                f"Waiting for question {next_number}"
-            )
+            text=f"Saved: Question {question.number} = {answer}. {self.waiting_status(next_number)}"
         )
-        self.set_answer_mode(False, saved=True)
+        self.set_question_stage("waiting", saved=True)
         self.focus_set()  # Keep focus on the window, not a widget that reacts to Space.
 
     def set_question_state(self, state: str) -> None:
-        """Colour the whole question screen: 'waiting' (neutral), 'awaiting' (amber), 'saved' (green)."""
+        """Colour the whole question screen: 'waiting' (neutral), 'asking' (blue), 'awaiting'
+        (amber), 'saved' (green)."""
         if self.q_flash_after is not None:
             self.after_cancel(self.q_flash_after)
             self.q_flash_after = None
         bg, text = {
-            "waiting": (self.q_neutral_bg, "READY – mark next question"),
+            "waiting": (self.q_neutral_bg, "READY – Space when you start asking"),
+            "asking": ("#90caf9", "ASKING – Space when you finish asking"),
             "awaiting": ("#ffd54f", "ANSWER?  " + ANSWER_HINT.replace(" = ", " ").replace(", ", " · ")),
             "saved": ("#81c784", "SAVED"),
         }[state]
@@ -793,45 +986,41 @@ class PolygraphApp(tk.Tk):
         if self.q_screen_active and self.pending_question is None:
             self.set_question_state("waiting")
 
-    def set_answer_mode(self, awaiting_answer: bool, saved: bool = False) -> None:
-        """Enable the answer buttons (and disable marking) while a question awaits its answer."""
-        self.set_question_state("awaiting" if awaiting_answer else "saved" if saved else "waiting")
+    def set_question_stage(self, stage: str, saved: bool = False) -> None:
+        """Show a question stage: 'waiting' for the start mark, 'asking' (until the end mark) or
+        'awaiting' the answer. The answer buttons are enabled only while awaiting the answer."""
+        self.set_question_state("saved" if saved else stage)
         self.answer_var.set("")
+        awaiting = stage == "awaiting"
         for button in self.answer_buttons:
-            button.config(state="normal" if awaiting_answer else "disabled")
-        self.mark_button.config(state="disabled" if awaiting_answer else "normal")
+            button.config(state="normal" if awaiting else "disabled")
+        self.mark_button.config(
+            state="disabled" if awaiting else "normal",
+            text="Start question (Space / Enter)" if stage == "waiting" else "End question (Space / Enter)",
+        )
 
     def undo_last(self) -> None:
-        """Cancel a pending mark, or reopen the last saved question for a new answer."""
+        """Undo the last answer: reopen the last saved question so it can be answered again.
+
+        Only answers can be undone; a question start or end mark can't.
+        """
         if self.finished or not self.recording or self.connection_lost:
             return
         now = time.monotonic()
         if now - self.last_undo_at < MARK_DEBOUNCE_SECONDS:
             return  # A held Backspace must undo only one step.
-        if self.pending_question is not None:
-            number = self.pending_question.number
-            self.pending_question = None
-            self.last_undo_at = now
-            self.set_answer_mode(False)
-            self.status_label.config(text=f"Mark for question {number} cancelled. Waiting for question {number}")
-        elif self.questions:
-            question = self.questions.pop()
-            question.answer = ""
-            # It will be answered again, so its answer mark is cleared; the question mark stays.
-            question.answer_time_s = question.answer_pc_time_s = 0.0
-            self.answer_clock_at.pop(question.number, None)
-            self.pending_question = question  # Keeps its original mark time.
-            self.last_undo_at = now
-            self.set_answer_mode(True)
-            self.show_question_text(self.question_label, question.number)
-            self.status_label.config(
-                text=(
-                    f"Question {question.number} reopened (marked at {question.time_s:.3f} s)"
-                    f" — press {ANSWER_HINT}"
-                )
-            )
-        else:
+        if self.pending_question is not None or not self.questions:
             return
+        question = self.questions.pop()
+        question.answer = ""
+        # It will be answered again, so its answer mark is cleared; start and end marks stay.
+        question.answer_time_s = None
+        self.answer_clock_at.pop(question.number, None)
+        self.pending_question = question
+        self.last_undo_at = now
+        self.set_question_stage("awaiting")
+        self.show_question_text(self.question_label, question.number)
+        self.status_label.config(text=f"Question {question.number} reopened — press {ANSWER_HINT}")
         self.focus_set()
 
     def handle_sample(self, arduino_us: int, raw_adc: int, received_at: float) -> None:
@@ -1034,6 +1223,8 @@ class PolygraphApp(tk.Tk):
         # connection_lost stays set while finish_measurement may ask questions, so keys
         # stay ignored and a reconnect in the meantime is still handled.
         self.finish_measurement()
+        if self.recording_started_at is None:
+            return  # Nothing was answered: back on the setup screen, which reconnects by itself.
         if self.recording:  # The operator cancelled finishing.
             if self.connection_lost:
                 self.show_loss_bubble("Still reconnecting...")
@@ -1047,12 +1238,7 @@ class PolygraphApp(tk.Tk):
         if self.finished:
             return
         if self.pending_question is not None:
-            answer = self.answer_var.get()
-            if answer in ANSWER_CHOICES:
-                self.pending_question.answer = answer
-                self.record_answer_mark(self.pending_question)
-                self.questions.append(self.pending_question)
-            elif not messagebox.askyesno(
+            if not messagebox.askyesno(
                 "Unfinished question",
                 "The current question has no saved answer. Finish without saving this question?",
             ):
@@ -1061,11 +1247,34 @@ class PolygraphApp(tk.Tk):
 
         self.recording = False
         if not self.questions:
-            if messagebox.askyesno("No questions", "No questions were saved. Save the voltage recording anyway?"):
-                self.finish_truth()
+            # Before the setup screen exists, so the Enter that closes this can't start an examination.
+            messagebox.showinfo("Nothing saved", "No questions were answered, so nothing was saved.")
+            self.discard_examination()
             return
 
         self.show_truth_screen()
+
+    def discard_examination(self) -> None:
+        """Drop the examination without saving and go back to the setup screen."""
+        self.recording = False
+        self.recording_started_at = None
+        self.phase_started_at = None
+        self.pending_question = None
+        self.samples.clear()
+        self.questions.clear()
+        self.bpm_readings.clear()
+        self.answer_clock_at.clear()
+        self.zero_started_at = None
+        self.set_zero_warning(False)
+        self.close_loss_bubble()
+        self.connection_lost = False
+        self.paused_at = None
+        if self.connection is not None:
+            self.last_valid_sample_at = time.monotonic()
+            self.show_setup_screen()
+        else:  # Ended from the "Connection lost" window: look for the Arduino again.
+            self.show_connecting_screen()
+            self.start_connect()
 
     def show_truth_screen(self) -> None:
         self.clear_screen()
@@ -1190,7 +1399,7 @@ class PolygraphApp(tk.Tk):
             return
         self.finished = True
         self.unbind_keys()
-        self.save_files(partial=False)
+        self.save_files()
         self.close_serial()
         self.show_results_screen()
 
@@ -1205,7 +1414,7 @@ class PolygraphApp(tk.Tk):
         results = ttk.Frame(self.container)
         results.pack(fill="both", expand=True)
         results.rowconfigure(0, weight=1)
-        results.columnconfigure(0, weight=2, minsize=560, uniform="results")
+        results.columnconfigure(0, weight=2, minsize=640, uniform="results")
         results.columnconfigure(1, weight=3, uniform="results")
         table_pane = ttk.Frame(results)
         table_pane.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
@@ -1216,28 +1425,27 @@ class PolygraphApp(tk.Tk):
 
     def build_graph(self, parent: ttk.Frame) -> None:
         try:
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+            from graph_view import GraphView  # Loads matplotlib; imported on first use only.
 
-            figure = plot_examination(*self.last_saved_paths, subject_name=self.subject_name)
-            canvas = FigureCanvasTkAgg(figure, master=parent)
+            assert self.last_saved_paths is not None
+            view = GraphView(parent, self.last_saved_paths[0], subject_name=self.subject_name, save_default_png=True)
         except Exception as error:  # The table and saved files must survive a graph failure.
             ttk.Label(
                 parent, text=f"The graph could not be drawn:\n{error}", foreground="#a40000", wraplength=500
             ).pack(expand=True)
             return
-        toolbar = NavigationToolbar2Tk(canvas, parent, pack_toolbar=False)
-        toolbar.update()
-        toolbar.pack(side="bottom", fill="x")
-        parent.pack_propagate(False)  # The pane sets the graph's size, not the figure's 13x8 inches.
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-        canvas.draw()
+        parent.pack_propagate(False)  # The pane sets the graph's size, not the figure's.
+        view.pack(fill="both", expand=True)
 
     def build_summary_table(self, parent: ttk.Frame) -> None:
         # Bottom items are packed first so they can never be clipped.
-        ttk.Button(parent, text="Close (Esc)", command=self.on_close).pack(side="bottom", pady=(8, 4))
+        buttons = ttk.Frame(parent)
+        buttons.pack(side="bottom", pady=(8, 4))
+        ttk.Button(buttons, text="Home (H)", command=self.go_home).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Close (Esc)", command=self.on_close).pack(side="left", padx=6)
         ttk.Label(
             parent,
-            text=f"Files saved in: {OUTPUT_FOLDER}\n{self.recording_stats()}",
+            text=f"Files saved in: {OUTPUT_FOLDER}\n{self.questions_note()}\n{self.recording_stats()}",
             foreground="#6a6a6a",
             wraplength=540,
             justify="center",
@@ -1248,77 +1456,40 @@ class PolygraphApp(tk.Tk):
         )
         ttk.Label(parent, text="Examination summary", style="Title.TLabel").pack(pady=(4, 8))
 
-        table_frame = ttk.Frame(parent)
-        table_frame.pack(fill="both", expand=True)
-        table_frame.columnconfigure(0, weight=1)
-        table_frame.rowconfigure(1, weight=1)
-        # A grid of labels, not a ttk.Treeview: Treeview rows share one height, so text can't wrap.
-        cell_padx, cell_pady = 6, 5
-        columns = (  # (heading, fixed width or 0 to take the remaining space, anchor)
-            ("#", 40, "center"),
-            ("Question", 0, "w"),
-            ("Answer", 90, "center"),
-            ("Prediction", 110, "center"),
-            ("Certainty", 90, "center"),
-        )
-        fixed_width = sum(width for _heading, width, _anchor in columns)
-
-        header = tk.Frame(table_frame, bg="#e0e0e0")
-        header.grid(row=0, column=0, sticky="ew")
-        canvas = tk.Canvas(table_frame, bg="white", highlightthickness=0)
-        canvas.grid(row=1, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        rows_frame = tk.Frame(canvas, bg="white")
-        rows_window = canvas.create_window(0, 0, anchor="nw", window=rows_frame)
-
-        for frame in (header, rows_frame):
-            for index, (_heading, width, _anchor) in enumerate(columns):
-                frame.columnconfigure(index, minsize=width, weight=0 if width else 1)
-        for index, (heading, _width, anchor) in enumerate(columns):
-            tk.Label(
-                header, text=heading, font=("Segoe UI", 11, "bold"), bg="#e0e0e0", anchor=anchor,
-                padx=cell_padx, pady=cell_pady,
-            ).grid(row=0, column=index, sticky="nsew")
-
-        body_font = tkfont.Font(family="Segoe UI", size=12)
-        question_labels: list[tuple[tk.Label, str]] = []
-        for row, question in enumerate(self.questions):
-            text = QUESTION_TEXTS[question.number - 1]
+        rows = []
+        for q in self.questions:
             # PLACEHOLDER: replace with the classifier's output once it exists.
             prediction = random.choice(("Truth", "Lie"))
-            certainty = random.randint(50, 99)
-            values = (question.number, text, question.answer, prediction, f"{certainty}%")
-            background = "white" if row % 2 == 0 else "#f3f3f3"
-            for index, (value, (_heading, _width, anchor)) in enumerate(zip(values, columns)):
-                label = tk.Label(
-                    rows_frame, text=str(value), font=body_font, bg=background, anchor=anchor,
-                    justify="left", padx=cell_padx, pady=cell_pady,
-                )
-                label.grid(row=row, column=index, sticky="nsew")
-                if index == 1:
-                    question_labels.append((label, text))
-                    if is_rtl(text):
-                        label.config(anchor="e", justify="right")
-
-        def on_canvas_resize(event: tk.Event) -> None:
-            canvas.itemconfigure(rows_window, width=event.width)
-            wrap_width = max(100, event.width - fixed_width - 2 * cell_padx)
-            for label, text in question_labels:
-                if is_rtl(text):
-                    label.config(text=wrap_rtl(text, body_font, wrap_width))
-                else:
-                    label.config(wraplength=wrap_width)
-
-        def on_mouse_wheel(event: tk.Event) -> None:
-            over_table = str(event.widget).startswith(str(canvas))  # Not when pointing at the graph.
-            if over_table and rows_frame.winfo_height() > canvas.winfo_height():
-                canvas.yview_scroll(-event.delta // 120, "units")
-
-        canvas.bind("<Configure>", on_canvas_resize)
-        rows_frame.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+            certainty = f"{random.randint(50, 99)}%"
+            rows.append((q.number, QUESTION_TEXTS[q.number - 1], q.answer, q.truth, prediction, certainty))
+        on_mouse_wheel = build_question_table(parent, rows)
         self.bind_keys({"<MouseWheel>": on_mouse_wheel})
+        self.bind_letter_keys({"h": lambda _e: self.go_home()})
+
+    def go_home(self) -> None:
+        """Results screen: back to the setup screen for a new examination. The examination
+        is already saved and the port closed (finish_truth), so this reconnects first."""
+        if not self.finished or self.recording_started_at is None:
+            return  # Not on the results screen (or already left it).
+        self.finished = False
+        self.last_saved_paths = None
+        self.questions_saved_to = None
+        self.truth_index = 0
+        # Sensor readings from the old connection must not show as live on the setup screen.
+        self.latest_bpm = None
+        self.last_locked_bpm = None
+        self.last_gsr_raw = None
+        self.last_gsr_in_range_at = None
+        # Opening the port resets the Arduino, so micros() restarts.
+        self.unwrapper = MicrosUnwrapper()
+        self.anchor_us = None
+        try:
+            self.state("normal")  # Undo the results screen's maximized window.
+        except tk.TclError:
+            pass
+        self.minsize(700, 480)
+        self.geometry("800x560")
+        self.discard_examination()  # Clears the examination data; with no connection it reconnects.
 
     def recording_stats(self) -> str:
         return (
@@ -1326,16 +1497,43 @@ class PolygraphApp(tk.Tk):
             f"malformed serial lines ignored: {self.bad_line_count}"
         )
 
-    def save_files(self, partial: bool) -> str:
-        voltage_path, questions_path, bpm_path = self.last_saved_paths = save_examination(
-            OUTPUT_FOLDER, self.file_stem, self.samples, self.questions, self.bpm_readings, partial
-        )
+    def questions_note(self) -> str:
+        saved_to = self.questions_saved_to
+        if saved_to is None or saved_to.name == SHARED_QUESTIONS_FILENAME:
+            return f"Questions added to {SHARED_QUESTIONS_FILENAME}"
+        return f"Questions saved to {saved_to.name} ({SHARED_QUESTIONS_FILENAME} could not be written)"
 
-        kind = "Partial files were saved" if partial else "Files saved"
-        return (
-            f"{kind} in:\n{OUTPUT_FOLDER}\n\n"
-            f"{voltage_path.name}\n{questions_path.name}\n{bpm_path.name}\n\n"
-            f"{self.recording_stats()}"
+    def save_files(self) -> None:
+        """Save a finished examination: its voltage and heart-rate files, and its questions
+        appended to the shared questions file (or a fallback file if that can't be written)."""
+        self.last_saved_paths = save_examination(OUTPUT_FOLDER, self.file_stem, self.samples, self.bpm_readings)
+        rows = question_rows(self.file_stem, self.questions, QUESTION_TEXTS)
+        while True:
+            try:
+                self.questions_saved_to = append_shared_questions(OUTPUT_FOLDER, rows)
+                return
+            except QuestionsFileMismatch as error:
+                message = (
+                    f"{error} The questions can't be added to it.\n\n"
+                    "Rename or move it (a new one will be created) and press Retry."
+                )
+            except OSError as error:
+                print(f"Could not write {SHARED_QUESTIONS_FILENAME}: {error}")
+                message = (
+                    f"{SHARED_QUESTIONS_FILENAME} is open in another program (e.g. Excel). "
+                    "Close it and press Retry."
+                )
+            if not messagebox.askretrycancel(
+                "Questions not saved",
+                f"{message}\n\nCancel saves this examination's questions to a separate file instead.",
+                icon=messagebox.WARNING,
+            ):
+                break
+        self.questions_saved_to = write_fallback_questions(OUTPUT_FOLDER, self.file_stem, rows)
+        messagebox.showinfo(
+            "Questions saved separately",
+            f"This examination's questions were saved to\n{self.questions_saved_to}\n\n"
+            f"They were not added to {SHARED_QUESTIONS_FILENAME}.",
         )
 
     def close_serial(self) -> None:
@@ -1352,18 +1550,16 @@ class PolygraphApp(tk.Tk):
         self.connection = None
 
     def on_close(self) -> None:
-        if self.recording:
-            choice = messagebox.askyesnocancel(
+        # Unsaved examination: rest, questions or truth classification (saved only when finished).
+        if self.recording_started_at is not None and not self.finished:
+            if not messagebox.askyesno(
                 "Close examination",
-                "An examination is running. Save partial data before closing?\n\n"
-                "Yes: save and exit\nNo: exit without saving\nCancel: keep recording",
-                default=messagebox.CANCEL,
-            )
-            if choice is None:
+                "The examination will be discarded. Quit anyway?",
+                icon=messagebox.WARNING,
+                default=messagebox.NO,
+            ):
                 return
             self.recording = False
-            if choice:
-                self.save_files(partial=True)
         self.finished = True
         self.cancel_retry()
         self.close_serial()

@@ -30,8 +30,8 @@ Note for educators: a reaction shows arousal (surprise, worry, embarrassment, ex
 1. **Sensors.** The GSR sensor turns skin conductance into a voltage. The heart-rate sensor measures reflected infrared light.
 2. **Arduino** (a small microcontroller board). It reads the GSR voltage 500 times per second. It reads the light sensor 100 times per second, finds the heartbeats itself, and works out the heart rate once per second.
 3. **USB cable.** The Arduino sends all of this to the laptop as lines of text.
-4. **Laptop app.** The operator types the visitor's name, waits through a short rest period, then reads out each question shown on screen (the list is in `config.toml`), pressing a key when they finish asking it and another key when the visitor answers (Yes / No / Undefined). After the last question the operator marks each answer as Truth or Lie.
-5. **Files, summary and graph.** As soon as the last answer is marked, the app saves three spreadsheet files (CSV) and shows one screen with a summary table on the left and a graph on the right. The table lists every question with the visitor's answer and the polygraph's prediction and certainty. The prediction and certainty are random placeholders until a classifier exists, and they are not saved. The top graph is the skin-conductance signal after electrical interference is cleaned out, and the bottom graph is the heart rate. Each question is a dashed line at the moment the visitor answered: green for Truth, red for Lie, grey if it was not classified. Grey bands on the heart-rate graph mark times when the heart-rate sensor was disconnected.
+4. **Laptop app.** The operator types the visitor's name, waits through a short rest period, then reads out each question shown on screen (the list is in `config.toml`), pressing a key when they start asking it, again when they finish asking, and another key when the visitor answers (Yes / No / Undefined). After the last question the operator marks each answer as Truth or Lie.
+5. **Files, summary and graph.** As soon as the last answer is marked, the app saves two spreadsheet files (CSV) for the examination, adds its questions and answers to one shared questions file, and shows one screen with a summary table on the left and a graph on the right. The table lists every question with the visitor's answer and the polygraph's prediction and certainty. The prediction and certainty are random placeholders until a classifier exists, and they are not saved. The top graph is the skin-conductance signal after electrical interference is cleaned out, and the bottom graph is the heart rate. Each question is a dashed line at the moment the operator finished asking it: green for Truth, red for Lie, grey if it was not classified. Check boxes above the graph can also show when each question started and when the visitor answered. Grey bands on the heart-rate graph mark times when the heart-rate sensor was disconnected.
 
 ### Why the signal needs "cleaning"
 
@@ -42,7 +42,7 @@ Electrical wiring in the building hums at 50 times per second (50 Hz), and the w
 | Document | Contents |
 |---|---|
 | [serial-protocol.md](serial-protocol.md) | Every line the firmware sends over USB serial (GSR samples, `B,...` heart-rate lines, `#` comments, test-mode output), with each field's meaning, units, range, rate and edge cases |
-| [csv-files.md](csv-files.md) | The files the app saves (`*_voltage.csv`, `*_questions.csv`, `*_bpm.csv`, and `_PARTIAL` variants): filename rules, every column, and how the three time columns relate |
+| [csv-files.md](csv-files.md) | The files the app saves (`*_voltage.csv`, `*_bpm.csv` and the shared `questions.csv`): when they are written, filename rules, every column, and how the three time columns relate |
 | [filters-gsr.md](filters-gsr.md) | The GSR cleaning chain in `gsr_filters.py` (20 ms mains-cancelling average plus a 5 Hz zero-phase low-pass), with parameters and the reasons for them |
 | [filters-heart-rate.md](filters-heart-rate.md) | The firmware heart-rate chain: finger detection, 0.7–3.5 Hz band-pass, inversion, adaptive-threshold peak detection, interval validation, and the lock / re-acquire state machine, plus what the app does with BPM |
 | [known-issues.md](known-issues.md) | Problems found in testing that are not fixed yet, when they matter, and likely fixes |
@@ -63,5 +63,5 @@ Related documents elsewhere in the repo:
 | GUI, time base, question marking | [python_app/main.py](../python_app/main.py) |
 | CSV writing | [python_app/records.py](../python_app/records.py) |
 | GSR filters | [python_app/gsr_filters.py](../python_app/gsr_filters.py) |
-| End-of-session graph | [python_app/plotting.py](../python_app/plotting.py) |
+| End-of-session graph | [python_app/plotting.py](../python_app/plotting.py) (drawing, loading a recording), [python_app/graph_view.py](../python_app/graph_view.py) (window with mark check boxes and Save PNG) |
 | Offline and live noise diagnostics (not used by the app) | [python_app/gsr_diagnostics.py](../python_app/gsr_diagnostics.py) |
